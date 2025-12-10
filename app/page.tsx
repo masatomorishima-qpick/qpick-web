@@ -4,43 +4,43 @@ import { FormEvent, useState } from 'react';
 
 const AREAS = ['新宿', '渋谷', '池袋'];
 
-type Store = {
-  id: number;
-  name: string;
-  chain?: string | null;
-  address?: string | null;
-};
+// stores テーブルのカラム名はプロジェクトごとに違う可能性があるので
+// ここでは any にして柔軟に扱います
+type Store = any;
 
 export default function HomePage() {
   const [keyword, setKeyword] = useState('');
   const [area, setArea] = useState(AREAS[0]);
   const [loading, setLoading] = useState(false);
   const [stores, setStores] = useState<Store[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError(null);
 
-    // いまはダミーデータで動作確認（あとでSupabaseに差し替え）
-    const dummy: Store[] = [
-      {
-        id: 1,
-        name: `${area}サンプル店 1号店`,
-        chain: 'セブンイレブン',
-        address: `${area}駅 徒歩3分`,
-      },
-      {
-        id: 2,
-        name: `${area}サンプル店 2号店`,
-        chain: 'ファミリーマート',
-        address: `${area}駅 徒歩5分`,
-      },
-    ];
+    try {
+      const params = new URLSearchParams({
+        keyword: keyword.trim(),
+        area,
+      });
 
-    setTimeout(() => {
-      setStores(dummy);
+      const res = await fetch(`/api/search?${params.toString()}`);
+
+      if (!res.ok) {
+        throw new Error('検索 API の呼び出しに失敗しました');
+      }
+
+      const json = await res.json();
+      setStores(json.stores ?? []);
+    } catch (err) {
+      console.error(err);
+      setError('検索中にエラーが発生しました。時間をおいて再度お試しください。');
+      setStores([]);
+    } finally {
       setLoading(false);
-    }, 500);
+    }
   };
 
   return (
@@ -127,6 +127,10 @@ export default function HomePage() {
           </button>
         </form>
 
+        {error && (
+          <p style={{ color: '#b91c1c', marginBottom: '0.75rem' }}>{error}</p>
+        )}
+
         <section>
           <h2
             style={{
@@ -142,22 +146,42 @@ export default function HomePage() {
             <p style={{ color: '#6b7280' }}>まだ検索されていません。</p>
           ) : (
             <ul style={{ display: 'grid', gap: '0.5rem' }}>
-              {stores.map((store) => (
-                <li
-                  key={store.id}
-                  style={{
-                    padding: '0.75rem',
-                    borderRadius: 12,
-                    border: '1px solid #e5e7eb',
-                  }}
-                >
-                  <div style={{ fontWeight: 600 }}>{store.name}</div>
-                  <div style={{ fontSize: '0.875rem', color: '#4b5563' }}>
-                    {store.chain && <span>{store.chain} / </span>}
-                    {store.address}
-                  </div>
-                </li>
-              ))}
+              {stores.map((store, index) => {
+                // カラム名がプロジェクトによって違っても、それなりに表示できるようにする
+                const displayName =
+                  (store.name as string) ??
+                  (store.store_name as string) ??
+                  (store.shop_name as string) ??
+                  '店舗名';
+
+                const displayChain =
+                  (store.chain as string) ??
+                  (store.chain_name as string) ??
+                  '';
+
+                const displayAddress =
+                  (store.address as string) ??
+                  (store.full_address as string) ??
+                  (store.road_address as string) ??
+                  '';
+
+                return (
+                  <li
+                    key={store.id ?? index}
+                    style={{
+                      padding: '0.75rem',
+                      borderRadius: 12,
+                      border: '1px solid #e5e7eb',
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>{displayName}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#4b5563' }}>
+                      {displayChain && <span>{displayChain} / </span>}
+                      {displayAddress}
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
