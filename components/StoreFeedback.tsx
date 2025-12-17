@@ -2,11 +2,16 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+// 1. GAイベント送信用の関数をインポート
+import { sendGAEvent } from '@next/third-parties/google';
 
 type Props = {
   storeId: string;
   storeName: string;
   productId: number;
+  // 2. 住所と電話番号をPropsに追加（データがない場合もあるので任意 '?' にしています）
+  address?: string | null;
+  phone?: string | null;
 };
 
 // セッションID生成（簡易版）
@@ -28,7 +33,7 @@ function getOrCreateSessionId() {
   }
 }
 
-export default function StoreFeedback({ storeId, storeName, productId }: Props) {
+export default function StoreFeedback({ storeId, storeName, productId, address, phone }: Props) {
   const [votedStatus, setVotedStatus] = useState<'found' | 'not_found' | null>(null);
   const [voteError, setVoteError] = useState<string | null>(null);
   const [voteLoading, setVoteLoading] = useState(false);
@@ -55,6 +60,9 @@ export default function StoreFeedback({ storeId, storeName, productId }: Props) 
     setVoteLoading(true);
     setVoteError(null);
     setCommentNotice(null);
+
+    // 投票アクションも計測したい場合はここで sendGAEvent を呼べます
+    // sendGAEvent('event', 'vote_store', { store_name: storeName, status: status });
 
     try {
       const sessionId = getOrCreateSessionId();
@@ -227,6 +235,64 @@ export default function StoreFeedback({ storeId, storeName, productId }: Props) 
             <div style={{ color: '#b91c1c', fontSize: '0.875rem', marginTop: '0.5rem' }}>
               {commentError}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* 3. 住所・電話番号表示エリア（GA計測付き） */}
+      {(address || phone) && (
+        <div style={{ marginTop: '0.5rem', paddingTop: '0.75rem', borderTop: '1px solid #f3f4f6', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          
+          {/* 住所ボタン */}
+          {address && (
+            <a
+              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => {
+                // GA計測イベント: tap_address
+                sendGAEvent('event', 'tap_address', { 
+                  store_name: storeName, 
+                  address_value: address 
+                });
+              }}
+              style={{ 
+                fontSize: '0.85rem', 
+                color: '#2563eb', 
+                textDecoration: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.25rem'
+              }}
+            >
+              <span>📍</span>
+              <span style={{ textDecoration: 'underline' }}>{address}</span>
+            </a>
+          )}
+
+          {/* 電話番号ボタン */}
+          {phone && (
+            <a
+              href={`tel:${phone}`}
+              onClick={() => {
+                // GA計測イベント: tap_phone
+                sendGAEvent('event', 'tap_phone', { 
+                  store_name: storeName, 
+                  phone_value: phone 
+                });
+              }}
+              style={{ 
+                fontSize: '0.85rem', 
+                color: '#2563eb', 
+                textDecoration: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.25rem'
+              }}
+            >
+              <span>📞</span>
+              <span style={{ textDecoration: 'underline' }}>{phone}</span>
+            </a>
           )}
         </div>
       )}

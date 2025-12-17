@@ -4,6 +4,8 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import StoreFeedback from '@/components/StoreFeedback';
 import { supabase } from '@/lib/supabaseClient';
 import Image from 'next/image';
+// ▼ 1. GA計測用の関数をインポート
+import { sendGAEvent } from '@next/third-parties/google';
 
 // stores テーブルのカラム名はプロジェクトごとに違う可能性があるので any
 type Store = any;
@@ -339,7 +341,6 @@ export default function HomePage() {
       setHasSearched(true);
 
       if (storesFromApi.length === 0) {
-        // ▼ メッセージ変更箇所：検索0件時にα版の注意書きを表示
         setNotice(
           `現在地から${RADIUS_KM}km以内に店舗が見つかりませんでした。※現在、α版のため「東京23区内の主要コンビニ」のみが対象です。`
         );
@@ -468,7 +469,6 @@ export default function HomePage() {
               α版：東京23区限定（セブン・ファミマ・ローソン）
             </span>
           </div>
-          {/* ▲ 追加ここまで ▲ */}
 
           <h1
             style={{
@@ -740,6 +740,11 @@ export default function HomePage() {
                             href={mapUrl}
                             target="_blank"
                             rel="noopener noreferrer"
+                            // ▼ 2. 住所クリックイベントを追加
+                            onClick={() => sendGAEvent('event', 'tap_address', { 
+                              store_name: displayName, 
+                              address_value: displayAddress 
+                            })}
                             style={{ color: '#2563eb', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}
                           >
                             📍 {displayAddress}
@@ -752,7 +757,15 @@ export default function HomePage() {
                       {displayPhone && (
                         <div>
                           {phoneDigits ? (
-                            <a href={`tel:${phoneDigits}`} style={{ color: '#2563eb', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <a 
+                              href={`tel:${phoneDigits}`} 
+                              // ▼ 3. 電話クリックイベントを追加
+                              onClick={() => sendGAEvent('event', 'tap_phone', { 
+                                store_name: displayName, 
+                                phone_value: displayPhone 
+                              })}
+                              style={{ color: '#2563eb', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}
+                            >
                               📞 {displayPhone}
                             </a>
                           ) : (
