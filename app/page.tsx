@@ -339,8 +339,9 @@ export default function HomePage() {
       setHasSearched(true);
 
       if (storesFromApi.length === 0) {
+        // ▼ メッセージ変更箇所：検索0件時にα版の注意書きを表示
         setNotice(
-          `現在地から${RADIUS_KM}km以内に店舗が見つかりませんでした。（店舗データが未登録の可能性もあります）`
+          `現在地から${RADIUS_KM}km以内に店舗が見つかりませんでした。※現在、α版のため「東京23区内の主要コンビニ」のみが対象です。`
         );
       }
 
@@ -429,12 +430,6 @@ export default function HomePage() {
           flexDirection: 'column',
         }}
       >
-        {/* =========================================
-            改善点1：ヘッダーをシンプルに
-            - ロゴを小さく
-            - キャッチコピーを明確に
-            - 説明文は削除
-           ========================================= */}
         <header
           style={{
             display: 'flex',
@@ -444,7 +439,7 @@ export default function HomePage() {
             textAlign: 'center',
           }}
         >
-          {/* ロゴ：サイズを小さく（width 160px程度） */}
+          {/* ロゴ：サイズを小さく */}
           <div style={{ marginBottom: '1rem' }}>
             <Image
               src="/qpick_logo.png"
@@ -455,6 +450,25 @@ export default function HomePage() {
               style={{ height: 'auto', objectFit: 'contain' }}
             />
           </div>
+
+          {/* ▼ 追加箇所：α版・地域限定バッジ ▼ */}
+          <div style={{ marginBottom: '1rem' }}>
+            <span
+              style={{
+                display: 'inline-block',
+                backgroundColor: '#eff6ff',
+                color: '#1d4ed8',
+                border: '1px solid #bfdbfe',
+                fontSize: '0.8rem',
+                fontWeight: 700,
+                padding: '0.3rem 0.8rem',
+                borderRadius: 999,
+              }}
+            >
+              α版：東京23区限定（セブン・ファミマ・ローソン）
+            </span>
+          </div>
+          {/* ▲ 追加ここまで ▲ */}
 
           <h1
             style={{
@@ -472,11 +486,6 @@ export default function HomePage() {
           </p>
         </header>
 
-        {/* =========================================
-            改善点2：検索体験を中心にしたUI
-            - 検索窓を主役に（シャドウを入れる）
-            - 入力 → 候補選択 → 検索ボタン の流れをスムーズに
-           ========================================= */}
         <div
           style={{
             backgroundColor: '#ffffff',
@@ -515,7 +524,6 @@ export default function HomePage() {
                   transition: 'box-shadow 0.2s',
                   backgroundColor: '#f8fafc',
                 }}
-                // フォーカス時のスタイルはCSSクラス推奨ですが、インライン簡易対応
                 onFocus={(e) => (e.currentTarget.style.boxShadow = '0 0 0 3px rgba(37, 99, 235, 0.2)')}
                 onBlur={(e) => (e.currentTarget.style.boxShadow = 'none')}
               />
@@ -530,7 +538,7 @@ export default function HomePage() {
             )}
             {suggestLoading && <p style={{ color: '#9ca3af', fontSize: '0.9rem', margin: 0, paddingLeft: '0.8rem' }}>候補を検索中…</p>}
 
-            {/* 候補リスト（確定前のみ表示） */}
+            {/* 候補リスト */}
             {!selectedCandidate && candidates.length > 0 && (
               <div style={{ display: 'grid', gap: '0.5rem' }}>
                 <p style={{ fontSize: '0.85rem', color: '#6b7280', margin: '0 0 0.25rem 0.5rem' }}>候補から選択してください</p>
@@ -644,10 +652,7 @@ export default function HomePage() {
           </form>
         </div>
 
-        {/* =========================================
-            店舗一覧表示エリア
-            - カードデザインを少しモダンに調整
-           ========================================= */}
+        {/* 店舗一覧表示エリア */}
         {(hasSearched || loading) && (
           <section style={{ marginTop: '2rem' }}>
             <h2 style={{ fontSize: '1.1rem', fontWeight: 800, marginBottom: '1rem', color: '#334155' }}>
