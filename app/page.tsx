@@ -470,6 +470,7 @@ export default function HomePage() {
             </span>
           </div>
 
+          {/* メインコピーの変更 */}
           <h1
             style={{
               fontSize: '1.25rem',
@@ -479,10 +480,11 @@ export default function HomePage() {
               lineHeight: 1.4,
             }}
           >
-            コンビニ在庫を、みんなで共有。
+            その新作、まだ近所にあるかも？
           </h1>
+          {/* サブコピーの変更 */}
           <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>
-            探す手間、ゼロに。
+            みんなの目撃情報で無駄足回避
           </p>
         </header>
 
@@ -513,7 +515,8 @@ export default function HomePage() {
                   setError(null);
                   setNotice(null);
                 }}
-                placeholder="商品名を入力（例：マスク）"
+                // プレースホルダー（入力例）の変更
+                placeholder="商品名を入力（例：みそきん、猫プリン）"
                 style={{
                   width: '100%',
                   padding: '1rem 1.2rem',
