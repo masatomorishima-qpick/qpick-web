@@ -12,8 +12,36 @@ type Props = {
   phone?: string | null;
 };
 
+type VotedStatus = 'found' | 'not_found';
+
+type VotedCache = {
+  status: VotedStatus;
+  timestamp: number;
+};
+
+type RpcResult = {
+  success: boolean;
+  message?: string | null;
+};
+
+type ApprovedComment = {
+  id: number;
+  comment: string;
+  created_at: string;
+};
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 // セッションID生成（簡易版）
-function getOrCreateSessionId() {
+function getOrCreateSessionId(): string {
   const KEY = 'qpick_session_id';
   try {
     const existing = localStorage.getItem(KEY);
@@ -31,8 +59,25 @@ function getOrCreateSessionId() {
   }
 }
 
+function parseVotedCache(raw: string): VotedCache | null {
+  try {
+    const obj: unknown = JSON.parse(raw);
+    if (typeof obj !== 'object' || obj === null) return null;
+
+    const status = (obj as { status?: unknown }).status;
+    const timestamp = (obj as { timestamp?: unknown }).timestamp;
+
+    if ((status === 'found' || status === 'not_found') && typeof timestamp === 'number') {
+      return { status, timestamp };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export default function StoreFeedback({ storeId, storeName, productId, address, phone }: Props) {
-  const [votedStatus, setVotedStatus] = useState<'found' | 'not_found' | null>(null);
+  const [votedStatus, setVotedStatus] = useState<VotedStatus | null>(null);
   const [voteError, setVoteError] = useState<string | null>(null);
   const [voteLoading, setVoteLoading] = useState(false);
 
@@ -43,38 +88,32 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
 
   // コメント表示用モーダルの状態
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [comments, setComments] = useState<any[]>([]);
+  const [comments, setComments] = useState<ApprovedComment[]>([]);
   const [commentsLoading, setCommentsLoading] = useState(false);
 
   const votedKey = useMemo(() => `qpick_voted:${storeId}:${productId}`, [storeId, productId]);
 
-  // 1時間経過チェック
+  // 1時間経過チェック（LocalStorage）
   useEffect(() => {
     try {
       const raw = localStorage.getItem(votedKey);
       if (!raw) return;
 
-      let data;
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        return;
-      }
+      const data = parseVotedCache(raw);
+      if (!data) return;
 
-      if (data && data.status && data.timestamp) {
-        const now = Date.now();
-        const oneHour = 60 * 60 * 1000;
-        if (now - data.timestamp < oneHour) {
-          setVotedStatus(data.status);
-        }
+      const now = Date.now();
+      const oneHour = 60 * 60 * 1000;
+      if (now - data.timestamp < oneHour) {
+        setVotedStatus(data.status);
       }
-    } catch (e) {
+    } catch (e: unknown) {
       console.error('LocalStorage read error:', e);
     }
   }, [votedKey]);
 
   // 投票処理
-  const handleVote = async (status: 'found' | 'not_found') => {
+  const handleVote = async (status: VotedStatus) => {
     if (votedStatus || voteLoading) return;
 
     setVoteLoading(true);
@@ -84,31 +123,32 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
     try {
       const sessionId = getOrCreateSessionId();
       const payload = {
-        p_store_id: storeId, 
+        p_store_id: storeId,
         p_product_id: productId,
         p_status: status,
         p_session_id: sessionId,
-        p_comment: null 
+        p_comment: null as string | null,
       };
 
       const { data, error } = await supabase.rpc('add_feedback_with_cooldown', payload);
 
       if (error) throw error;
 
-      if (data && data.success) {
+      const result = (data ?? null) as unknown as RpcResult | null;
+
+      if (result?.success) {
         setVotedStatus(status);
         const storageValue = JSON.stringify({
-          status: status,
-          timestamp: Date.now()
-        });
+          status,
+          timestamp: Date.now(),
+        } satisfies VotedCache);
         localStorage.setItem(votedKey, storageValue);
       } else {
-        setVoteError(data?.message || 'しばらく時間を空けてから再度お試しください。');
+        setVoteError(result?.message ?? 'しばらく時間を空けてから再度お試しください。');
       }
-
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setVoteError(e?.message ?? '投票に失敗しました。');
+      setVoteError(getErrorMessage(e) || '投票に失敗しました。');
     } finally {
       setVoteLoading(false);
     }
@@ -135,10 +175,9 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
       if (error) throw error;
 
       setComment('');
-      // ユーザーへのメッセージを変更
       setCommentNotice('報告ありがとうございます！承認後に表示されます。');
-    } catch (e: any) {
-      setCommentError(e?.message ?? 'コメント送信に失敗しました。');
+    } catch (e: unknown) {
+      setCommentError(getErrorMessage(e) || 'コメント送信に失敗しました。');
     } finally {
       setCommentLoading(false);
     }
@@ -153,13 +192,30 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
         .select('id, comment, created_at')
         .eq('store_id', storeId)
         .eq('product_id', productId)
-        .eq('is_approved', true) // ★承認済みのみ取得
+        .eq('is_approved', true)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-      setComments(data || []);
+
+      const list = (Array.isArray(data) ? data : []) as unknown as Array<{
+        id: unknown;
+        comment: unknown;
+        created_at: unknown;
+      }>;
+
+      const normalized: ApprovedComment[] = list
+        .map((row) => {
+          const id = Number(row.id);
+          const commentText = typeof row.comment === 'string' ? row.comment : '';
+          const createdAt = typeof row.created_at === 'string' ? row.created_at : '';
+          if (!Number.isFinite(id) || !createdAt) return null;
+          return { id, comment: commentText, created_at: createdAt };
+        })
+        .filter((v): v is ApprovedComment => v !== null);
+
+      setComments(normalized);
       setIsModalOpen(true);
-    } catch (e) {
+    } catch (e: unknown) {
       console.error('Comments fetch error:', e);
     } finally {
       setCommentsLoading(false);
@@ -168,19 +224,20 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
 
   return (
     <div style={{ display: 'grid', gap: '1rem' }}>
-      <div style={{ 
-        fontWeight: 800, 
-        fontSize: '1rem', 
-        color: '#1f2937', 
-        textAlign: 'center',
-        marginBottom: '-0.25rem' 
-      }}>
+      <div
+        style={{
+          fontWeight: 800,
+          fontSize: '1rem',
+          color: '#1f2937',
+          textAlign: 'center',
+          marginBottom: '-0.25rem',
+        }}
+      >
         在庫はどうでしたか？
       </div>
 
       {/* 投票ボタンエリア */}
       <div style={{ display: 'flex', gap: '1rem' }}>
-        
         {/* 買えたボタン */}
         <button
           type="button"
@@ -196,7 +253,7 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
             color: '#065f46',
             fontWeight: 800,
             cursor: !!votedStatus || voteLoading ? 'default' : 'pointer',
-            opacity: (votedStatus && votedStatus !== 'found') ? 0.3 : 1,
+            opacity: votedStatus && votedStatus !== 'found' ? 0.3 : 1,
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
@@ -206,8 +263,12 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
             boxShadow: votedStatus === 'found' ? 'none' : '0 4px 6px -1px rgba(16, 185, 129, 0.2)',
             transform: votedStatus === 'found' ? 'scale(0.98)' : 'scale(1)',
           }}
-          onMouseDown={(e) => e.currentTarget.style.transform = 'scale(0.96)'}
-          onMouseUp={(e) => e.currentTarget.style.transform = 'scale(1)'}
+          onMouseDown={(e) => {
+            e.currentTarget.style.transform = 'scale(0.96)';
+          }}
+          onMouseUp={(e) => {
+            e.currentTarget.style.transform = 'scale(1)';
+          }}
         >
           <span style={{ fontSize: '1.8rem', lineHeight: 1 }}>🙆</span>
           <span style={{ fontSize: '1rem' }}>ありました！</span>
@@ -228,7 +289,7 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
             color: '#991b1b',
             fontWeight: 800,
             cursor: !!votedStatus || voteLoading ? 'default' : 'pointer',
-            opacity: (votedStatus && votedStatus !== 'not_found') ? 0.3 : 1,
+            opacity: votedStatus && votedStatus !== 'not_found' ? 0.3 : 1,
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
@@ -238,15 +299,21 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
             boxShadow: votedStatus === 'not_found' ? 'none' : '0 4px 6px -1px rgba(239, 68, 68, 0.2)',
             transform: votedStatus === 'not_found' ? 'scale(0.98)' : 'scale(1)',
           }}
-          onMouseDown={(e) => e.currentTarget.style.transform = 'scale(0.96)'}
-          onMouseUp={(e) => e.currentTarget.style.transform = 'scale(1)'}
+          onMouseDown={(e) => {
+            e.currentTarget.style.transform = 'scale(0.96)';
+          }}
+          onMouseUp={(e) => {
+            e.currentTarget.style.transform = 'scale(1)';
+          }}
         >
           <span style={{ fontSize: '1.8rem', lineHeight: 1 }}>🙅</span>
           <span style={{ fontSize: '1rem' }}>なかった…</span>
         </button>
       </div>
 
-      {voteError && <div style={{ color: '#b91c1c', fontSize: '0.875rem', textAlign: 'center' }}>{voteError}</div>}
+      {voteError && (
+        <div style={{ color: '#b91c1c', fontSize: '0.875rem', textAlign: 'center' }}>{voteError}</div>
+      )}
 
       {/* コメント入力エリア（投票済みのみ表示） */}
       {votedStatus && (
@@ -256,7 +323,6 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
               type="text"
               value={comment}
               onChange={(e) => setComment(e.target.value)}
-              // ★修正：プレースホルダーを短縮
               placeholder="例）A賞終了"
               maxLength={140}
               style={{
@@ -282,7 +348,7 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
                 cursor: commentLoading || !comment.trim() ? 'not-allowed' : 'pointer',
                 whiteSpace: 'nowrap',
                 fontSize: '0.9rem',
-                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
               }}
             >
               {commentLoading ? '...' : '送信'}
@@ -290,7 +356,15 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
           </div>
 
           {commentNotice && (
-            <div style={{ color: '#059669', fontSize: '0.875rem', marginTop: '0.5rem', fontWeight: 600, textAlign: 'center' }}>
+            <div
+              style={{
+                color: '#059669',
+                fontSize: '0.875rem',
+                marginTop: '0.5rem',
+                fontWeight: 600,
+                textAlign: 'center',
+              }}
+            >
               {commentNotice}
             </div>
           )}
@@ -302,18 +376,17 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
         </div>
       )}
 
-      {/* ★修正：ボタン名をシンプルに変更 */}
       <div style={{ textAlign: 'center' }}>
-        <button 
+        <button
           onClick={fetchComments}
-          style={{ 
-            fontSize: '0.9rem', 
-            color: '#4b5563', 
-            textDecoration: 'underline', 
-            background: 'none', 
-            border: 'none', 
+          style={{
+            fontSize: '0.9rem',
+            color: '#4b5563',
+            textDecoration: 'underline',
+            background: 'none',
+            border: 'none',
             cursor: 'pointer',
-            padding: '0.5rem'
+            padding: '0.5rem',
           }}
         >
           💬 コメントを見る
@@ -322,7 +395,16 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
 
       {/* 住所・電話番号 */}
       {(address || phone) && (
-        <div style={{ marginTop: '0.5rem', paddingTop: '0.75rem', borderTop: '1px solid #f3f4f6', display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+        <div
+          style={{
+            marginTop: '0.5rem',
+            paddingTop: '0.75rem',
+            borderTop: '1px solid #f3f4f6',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.8rem',
+          }}
+        >
           {address && (
             <a
               href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`}
@@ -331,7 +413,14 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
               onClick={() => {
                 sendGAEvent('event', 'tap_address', { store_name: storeName, address_value: address });
               }}
-              style={{ fontSize: '0.9rem', color: '#4b5563', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+              style={{
+                fontSize: '0.9rem',
+                color: '#4b5563',
+                textDecoration: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+              }}
             >
               <span style={{ fontSize: '1.1rem' }}>📍</span>
               <span style={{ textDecoration: 'underline' }}>{address}</span>
@@ -343,7 +432,14 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
               onClick={() => {
                 sendGAEvent('event', 'tap_phone', { store_name: storeName, phone_value: phone });
               }}
-              style={{ fontSize: '0.9rem', color: '#4b5563', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+              style={{
+                fontSize: '0.9rem',
+                color: '#4b5563',
+                textDecoration: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+              }}
             >
               <span style={{ fontSize: '1.1rem' }}>📞</span>
               <span style={{ textDecoration: 'underline' }}>{phone}</span>
@@ -352,22 +448,25 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
         </div>
       )}
 
-      {/* ★コメント表示モーダル */}
+      {/* コメント表示モーダル */}
       {isModalOpen && (
-        <div 
+        <div
           style={{
             position: 'fixed',
-            top: 0, left: 0, right: 0, bottom: 0,
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
             backgroundColor: 'rgba(0,0,0,0.5)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             zIndex: 9999,
-            padding: '1rem'
+            padding: '1rem',
           }}
           onClick={() => setIsModalOpen(false)}
         >
-          <div 
+          <div
             style={{
               backgroundColor: '#fff',
               width: '100%',
@@ -377,22 +476,36 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
               display: 'flex',
               flexDirection: 'column',
               boxShadow: '0 10px 25px rgba(0,0,0,0.2)',
-              overflow: 'hidden'
+              overflow: 'hidden',
             }}
-            onClick={e => e.stopPropagation()} // 中身クリックで閉じないように
+            onClick={(e) => e.stopPropagation()}
           >
-            {/* ヘッダー */}
-            <div style={{ padding: '1rem', borderBottom: '1px solid #eee', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#f9fafb' }}>
+            <div
+              style={{
+                padding: '1rem',
+                borderBottom: '1px solid #eee',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                backgroundColor: '#f9fafb',
+              }}
+            >
               <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 800, color: '#1f2937' }}>コメント一覧</h3>
-              <button 
+              <button
                 onClick={() => setIsModalOpen(false)}
-                style={{ border: 'none', background: 'none', fontSize: '1.5rem', cursor: 'pointer', color: '#6b7280', lineHeight: 1 }}
+                style={{
+                  border: 'none',
+                  background: 'none',
+                  fontSize: '1.5rem',
+                  cursor: 'pointer',
+                  color: '#6b7280',
+                  lineHeight: 1,
+                }}
               >
                 ×
               </button>
             </div>
 
-            {/* リストエリア */}
             <div style={{ padding: '1rem', overflowY: 'auto' }}>
               {commentsLoading ? (
                 <div style={{ textAlign: 'center', padding: '1rem', color: '#6b7280' }}>読み込み中...</div>
@@ -401,23 +514,61 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
                   まだ承認済みのコメントはありません。<br />（投稿は承認後に表示されます）
                 </div>
               ) : (
-                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                <ul
+                  style={{
+                    listStyle: 'none',
+                    padding: 0,
+                    margin: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.75rem',
+                  }}
+                >
                   {comments.map((c) => (
-                    <li key={c.id} style={{ backgroundColor: '#f3f4f6', padding: '0.75rem', borderRadius: '8px', fontSize: '0.9rem' }}>
+                    <li
+                      key={c.id}
+                      style={{
+                        backgroundColor: '#f3f4f6',
+                        padding: '0.75rem',
+                        borderRadius: '8px',
+                        fontSize: '0.9rem',
+                      }}
+                    >
                       <div style={{ color: '#374151', whiteSpace: 'pre-wrap' }}>{c.comment}</div>
-                      <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '0.4rem', textAlign: 'right' }}>
-                        {new Date(c.created_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      <div
+                        style={{
+                          fontSize: '0.75rem',
+                          color: '#9ca3af',
+                          marginTop: '0.4rem',
+                          textAlign: 'right',
+                        }}
+                      >
+                        {new Date(c.created_at).toLocaleString('ja-JP', {
+                          month: 'numeric',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
                       </div>
                     </li>
                   ))}
                 </ul>
               )}
             </div>
-            
+
             <div style={{ padding: '0.75rem', borderTop: '1px solid #eee', textAlign: 'center' }}>
-              <button 
+              <button
                 onClick={() => setIsModalOpen(false)}
-                style={{ width: '100%', padding: '0.6rem', backgroundColor: '#374151', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 600, cursor: 'pointer' }}
+                style={{
+                  width: '100%',
+                  padding: '0.6rem',
+                  backgroundColor: '#374151',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
               >
                 閉じる
               </button>
@@ -425,7 +576,6 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
           </div>
         </div>
       )}
-
     </div>
   );
 }

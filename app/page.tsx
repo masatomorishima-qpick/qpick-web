@@ -4,16 +4,49 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import StoreFeedback from '@/components/StoreFeedback';
 import { supabase } from '@/lib/supabaseClient';
 import Image from 'next/image';
-// ▼ 1. GA計測用の関数をインポート
 import { sendGAEvent } from '@next/third-parties/google';
-
-// stores テーブルのカラム名はプロジェクトごとに違う可能性があるので any
-type Store = any;
 
 type Candidate = {
   id: number;
   name: string;
   category?: string | null;
+};
+
+type StoreCommunity = {
+  windowDays?: number | null;
+  found?: number | null;
+  notFound?: number | null;
+  total?: number | null;
+  lastReportAt?: string | null;
+  label?: string | null;
+};
+
+type Store = {
+  id: string; // uuid（APIから文字列で来る想定）
+  chain?: string | null;
+
+  name?: string | null;
+  store_name?: string | null;
+  shop_name?: string | null;
+
+  address?: string | null;
+  full_address?: string | null;
+  road_address?: string | null;
+
+  phone?: string | null;
+  tel?: string | null;
+  telephone?: string | null;
+
+  latitude?: number | null;
+  longitude?: number | null;
+
+  // 互換用（念のため）
+  lat?: number | null;
+  lng?: number | null;
+
+  distance_m?: number | null;
+
+  community?: StoreCommunity | null;
 };
 
 // 検索ログ（RLSでINSERTのみ許可している前提）
@@ -52,8 +85,30 @@ function getCurrentPositionAsync(options?: PositionOptions) {
   });
 }
 
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+function isGeoError(err: unknown): err is { code: number; message?: string } {
+  if (typeof err !== 'object' || err === null) return false;
+  if (!('code' in err)) return false;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'number';
+}
+
+function pickFirstNonEmptyString(values: Array<unknown>): string | null {
+  for (const v of values) {
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (s) return s;
+    }
+  }
+  return null;
+}
+
 export default function HomePage() {
-  const RADIUS_KM = 1.5; // route.ts の radius_m=1500 と合わせる（表示用）
+  const RADIUS_KM = 5.0; // route.ts の radius_m=5000 と合わせる（表示用）
   const MIN_SUGGEST_CHARS = 2;
   const SUGGEST_DEBOUNCE_MS = 250;
 
@@ -68,7 +123,6 @@ export default function HomePage() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const [productId, setProductId] = useState<number | null>(null);
-  const [productName, setProductName] = useState<string | null>(null);
   const [highRiskStoreIds, setHighRiskStoreIds] = useState<string[]>([]);
 
   // サジェスト
@@ -99,32 +153,42 @@ export default function HomePage() {
     }
   }, [requestKey]);
 
-  const fmtDistance = (m: any) => {
+  const fmtDistance = (m: unknown) => {
     const n = Number(m);
     if (!Number.isFinite(n)) return null;
     if (n < 1000) return `${Math.round(n)}m`;
     return `${(n / 1000).toFixed(1)}km`;
   };
 
-  const buildMapUrl = (params: { latitude?: any; longitude?: any; address?: any }) => {
+  // Google Maps URLs API：店名 + 住所で検索（店舗詳細が開きやすい）
+  const buildMapUrl = (params: {
+    latitude?: unknown;
+    longitude?: unknown;
+    address?: unknown;
+    name?: unknown;
+  }) => {
     const lat = Number(params.latitude);
     const lng = Number(params.longitude);
+    const name = typeof params.name === 'string' ? params.name.trim() : '';
+    const addr = typeof params.address === 'string' ? params.address.trim() : '';
 
-    if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      // Google Maps（スマホではMapsアプリに遷移しやすい）
-      return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+    if (name && addr) {
+      const query = `${name} ${addr}`;
+      return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
     }
 
-    const addr = String(params.address ?? '').trim();
-    if (addr) {
-      return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`;
+    if (name) {
+      return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}`;
+    }
+
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
     }
 
     return null;
   };
 
   const normalizePhoneForTel = (phone: string) => {
-    // "03-1234-5678" → "0312345678"
     const digits = phone.replace(/\D/g, '');
     return digits || null;
   };
@@ -133,7 +197,7 @@ export default function HomePage() {
   const stripPostalCode = (address: string) => {
     return String(address ?? '')
       .replace(/〒\s*\d{3}-\d{4}\s*/g, '')
-      .replace(/^\s*\d{3}-\d{4}\s*/g, '') // 〒なしケースの保険
+      .replace(/^\s*\d{3}-\d{4}\s*/g, '')
       .trim();
   };
 
@@ -162,9 +226,8 @@ export default function HomePage() {
     color: opt.fg ?? pillBase.color,
   });
 
-  const renderCommunityCompact = (store: any) => {
+  const renderCommunityCompact = (store: Store) => {
     const c = store?.community;
-
     if (!c) return null;
 
     const found = Number(c.found ?? 0);
@@ -180,8 +243,12 @@ export default function HomePage() {
     return (
       <div style={{ marginTop: '0.5rem' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <span style={pill({ bg: '#ecfdf5', bd: '#bbf7d0', fg: '#166534' })}>✓ 買えた {found}</span>
-          <span style={pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })}>× 売切れ {notFound}</span>
+          <span style={pill({ bg: '#ecfdf5', bd: '#bbf7d0', fg: '#166534' })}>
+            ✓ 買えた {Number.isFinite(found) ? found : 0}
+          </span>
+          <span style={pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })}>
+            × 売切れ {Number.isFinite(notFound) ? notFound : 0}
+          </span>
 
           <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>直近{windowDays}日</span>
         </div>
@@ -240,11 +307,24 @@ export default function HomePage() {
         const res = await fetch(`/api/suggest?keyword=${encodeURIComponent(trimmedKeyword)}`, {
           signal: controller.signal,
         });
-        const json = await res.json().catch(() => ({}));
+        const json: unknown = await res.json().catch(() => ({}));
 
-        if (!res.ok) throw new Error(json?.error ?? 'サジェスト API の呼び出しに失敗しました');
+        const maybeError =
+          typeof json === 'object' && json !== null && 'error' in json
+            ? (json as { error?: unknown }).error
+            : undefined;
 
-        const list = (json.candidates ?? []) as Candidate[];
+        const maybeCandidates =
+          typeof json === 'object' && json !== null && 'candidates' in json
+            ? (json as { candidates?: unknown }).candidates
+            : undefined;
+
+        if (!res.ok) {
+          const msg = typeof maybeError === 'string' ? maybeError : 'サジェスト API の呼び出しに失敗しました';
+          throw new Error(msg);
+        }
+
+        const list = Array.isArray(maybeCandidates) ? (maybeCandidates as Candidate[]) : [];
 
         if (list.length === 0) {
           setCandidates([]);
@@ -253,11 +333,16 @@ export default function HomePage() {
           setCandidates(list);
           setNotice(null);
         }
-      } catch (e: any) {
-        if (e?.name === 'AbortError') return;
+      } catch (e: unknown) {
+        // AbortError は無視
+        if (typeof e === 'object' && e !== null && 'name' in e) {
+          const name = (e as { name?: unknown }).name;
+          if (name === 'AbortError') return;
+        }
+
         setCandidates([]);
         setNotice(null);
-        setError(e?.message ?? 'サジェスト中にエラーが発生しました。');
+        setError(getErrorMessage(e) || 'サジェスト中にエラーが発生しました。');
       } finally {
         setSuggestLoading(false);
       }
@@ -283,14 +368,12 @@ export default function HomePage() {
     setHighRiskStoreIds([]);
     setHasSearched(false);
     setProductId(null);
-    setProductName(null);
     setError(null);
   };
 
   const clearSelection = () => {
     setSelectedCandidate(null);
     setProductId(null);
-    setProductName(null);
     setHighRiskStoreIds([]);
     setStores([]);
     setHasSearched(false);
@@ -326,18 +409,36 @@ export default function HomePage() {
       });
 
       const res = await fetch(`/api/search?${params.toString()}`);
-      const json = await res.json().catch(() => ({}));
+      const json: unknown = await res.json().catch(() => ({}));
+
+      const maybeError =
+        typeof json === 'object' && json !== null && 'error' in json
+          ? (json as { error?: unknown }).error
+          : undefined;
 
       if (!res.ok) {
-        throw new Error(json?.error ?? '検索 API の呼び出しに失敗しました');
+        const msg = typeof maybeError === 'string' ? maybeError : '検索 API の呼び出しに失敗しました';
+        throw new Error(msg);
       }
 
-      const storesFromApi: Store[] = json.stores ?? [];
+      const storesFromApi =
+        typeof json === 'object' && json !== null && 'stores' in json && Array.isArray((json as { stores?: unknown }).stores)
+          ? ((json as { stores: unknown[] }).stores as Store[])
+          : [];
+
+      const apiProductId =
+        typeof json === 'object' && json !== null && 'productId' in json
+          ? Number((json as { productId?: unknown }).productId)
+          : NaN;
+
+      const apiHighRisk =
+        typeof json === 'object' && json !== null && 'highRiskStoreIds' in json && Array.isArray((json as { highRiskStoreIds?: unknown }).highRiskStoreIds)
+          ? ((json as { highRiskStoreIds: unknown[] }).highRiskStoreIds as string[])
+          : [];
 
       setStores(storesFromApi);
-      setProductId(json.productId ?? c.id);
-      setProductName(json.productName ?? c.name ?? null);
-      setHighRiskStoreIds(json.highRiskStoreIds ?? []);
+      setProductId(Number.isFinite(apiProductId) ? apiProductId : c.id);
+      setHighRiskStoreIds(apiHighRisk);
       setHasSearched(true);
 
       if (storesFromApi.length === 0) {
@@ -350,8 +451,9 @@ export default function HomePage() {
         keyword: c.name,
         storeCountShown: storesFromApi.length,
       });
-    } catch (err: any) {
-      if (typeof err?.code === 'number') {
+    } catch (err: unknown) {
+      // 位置情報系エラー（Geolocation）
+      if (isGeoError(err)) {
         if (err.code === 1) {
           setError(
             '検索には位置情報の許可が必要です。ブラウザの設定で許可をしてから、再度検索ボタンを押してください。'
@@ -364,7 +466,7 @@ export default function HomePage() {
           setError('位置情報が取得できませんでした。設定を確認して再度お試しください。');
         }
       } else {
-        setError(err?.message ?? '検索中にエラーが発生しました。時間をおいて再度お試しください。');
+        setError(getErrorMessage(err) || '検索中にエラーが発生しました。時間をおいて再度お試しください。');
       }
 
       setStores([]);
@@ -407,8 +509,8 @@ export default function HomePage() {
 
       setRequestSent(true);
       setNotice('追加要望を受け付けました。ありがとうございます。');
-    } catch (e: any) {
-      setError(e?.message ?? '追加要望の送信に失敗しました。');
+    } catch (e: unknown) {
+      setError(getErrorMessage(e) || '追加要望の送信に失敗しました。');
     }
   };
 
@@ -420,7 +522,7 @@ export default function HomePage() {
         flexDirection: 'column',
         alignItems: 'center',
         padding: '2rem 1rem',
-        backgroundColor: '#f8fafc', // 背景を少し明るいグレーに
+        backgroundColor: '#f8fafc',
       }}
     >
       <div
@@ -440,7 +542,6 @@ export default function HomePage() {
             textAlign: 'center',
           }}
         >
-          {/* ロゴ：サイズを小さく */}
           <div style={{ marginBottom: '1rem' }}>
             <Image
               src="/qpick_logo.png"
@@ -452,7 +553,6 @@ export default function HomePage() {
             />
           </div>
 
-          {/* ▼ 追加箇所：α版・地域限定バッジ ▼ */}
           <div style={{ marginBottom: '1rem' }}>
             <span
               style={{
@@ -470,7 +570,6 @@ export default function HomePage() {
             </span>
           </div>
 
-          {/* メインコピーの変更 */}
           <h1
             style={{
               fontSize: '1.25rem',
@@ -482,7 +581,7 @@ export default function HomePage() {
           >
             その新作、まだ近所にあるかも？
           </h1>
-          {/* サブコピーの変更 */}
+
           <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>
             みんなの目撃情報で無駄足回避
           </p>
@@ -511,11 +610,9 @@ export default function HomePage() {
                   setHighRiskStoreIds([]);
                   setHasSearched(false);
                   setProductId(null);
-                  setProductName(null);
                   setError(null);
                   setNotice(null);
                 }}
-                // プレースホルダー（入力例）の変更
                 placeholder="商品名を入力（例：みそきん、猫プリン）"
                 style={{
                   width: '100%',
@@ -532,19 +629,24 @@ export default function HomePage() {
               />
             </div>
 
-            {/* エラー・通知メッセージ */}
-            {(error || notice) && (
+            {(error || (notice && !hasSearched)) && (
               <div style={{ fontSize: '0.9rem', padding: '0 0.5rem' }}>
                 {error && <p style={{ color: '#ef4444', margin: 0 }}>{error}</p>}
-                {notice && <p style={{ color: '#6b7280', margin: 0 }}>{notice}</p>}
+                {notice && !hasSearched && <p style={{ color: '#6b7280', margin: 0 }}>{notice}</p>}
               </div>
             )}
-            {suggestLoading && <p style={{ color: '#9ca3af', fontSize: '0.9rem', margin: 0, paddingLeft: '0.8rem' }}>候補を検索中…</p>}
 
-            {/* 候補リスト */}
+            {suggestLoading && (
+              <p style={{ color: '#9ca3af', fontSize: '0.9rem', margin: 0, paddingLeft: '0.8rem' }}>
+                候補を検索中…
+              </p>
+            )}
+
             {!selectedCandidate && candidates.length > 0 && (
               <div style={{ display: 'grid', gap: '0.5rem' }}>
-                <p style={{ fontSize: '0.85rem', color: '#6b7280', margin: '0 0 0.25rem 0.5rem' }}>候補から選択してください</p>
+                <p style={{ fontSize: '0.85rem', color: '#6b7280', margin: '0 0 0.25rem 0.5rem' }}>
+                  候補から選択してください
+                </p>
                 {candidates.map((c) => (
                   <button
                     key={c.id}
@@ -569,7 +671,6 @@ export default function HomePage() {
               </div>
             )}
 
-            {/* 候補0件 → 追加要望 */}
             {!selectedCandidate &&
               trimmedKeyword.length >= MIN_SUGGEST_CHARS &&
               candidates.length === 0 &&
@@ -593,7 +694,6 @@ export default function HomePage() {
                 </button>
               )}
 
-            {/* 確定後の表示 ＆ 検索ボタン */}
             {selectedCandidate && (
               <div style={{ animation: 'fadeIn 0.3s ease-in' }}>
                 <div
@@ -655,16 +755,27 @@ export default function HomePage() {
           </form>
         </div>
 
-        {/* 店舗一覧表示エリア */}
         {(hasSearched || loading) && (
           <section style={{ marginTop: '2rem' }}>
             <h2 style={{ fontSize: '1.1rem', fontWeight: 800, marginBottom: '1rem', color: '#334155' }}>
               検索結果
-              {stores.length > 0 && <span style={{ fontSize: '0.9rem', fontWeight: 400, marginLeft: '0.5rem', color: '#64748b' }}>{stores.length}件見つかりました</span>}
+              {stores.length > 0 && (
+                <span style={{ fontSize: '0.9rem', fontWeight: 400, marginLeft: '0.5rem', color: '#64748b' }}>
+                  {stores.length}件見つかりました
+                </span>
+              )}
             </h2>
 
             {stores.length === 0 && !loading && !error && (
-              <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280', backgroundColor: '#fff', borderRadius: 16 }}>
+              <div
+                style={{
+                  textAlign: 'center',
+                  padding: '2rem',
+                  color: '#6b7280',
+                  backgroundColor: '#fff',
+                  borderRadius: 16,
+                }}
+              >
                 <p>{notice ?? `半径${RADIUS_KM}km以内にデータが見つかりませんでした。`}</p>
               </div>
             )}
@@ -672,24 +783,15 @@ export default function HomePage() {
             <ul style={{ display: 'grid', gap: '1rem', listStyle: 'none', padding: 0, margin: 0 }}>
               {stores.map((store, index) => {
                 const displayName =
-                  (store.name as string) ??
-                  (store.store_name as string) ??
-                  (store.shop_name as string) ??
-                  '店舗名';
+                  pickFirstNonEmptyString([store.name, store.store_name, store.shop_name]) ?? '店舗名';
 
                 const displayAddressRaw =
-                  (store.address as string) ??
-                  (store.full_address as string) ??
-                  (store.road_address as string) ??
-                  '';
+                  pickFirstNonEmptyString([store.address, store.full_address, store.road_address]) ?? '';
 
                 const displayAddress = stripPostalCode(displayAddressRaw);
 
                 const displayPhone =
-                  (store.phone as string) ??
-                  (store.tel as string) ??
-                  (store.telephone as string) ??
-                  '';
+                  pickFirstNonEmptyString([store.phone, store.tel, store.telephone]) ?? '';
 
                 const phoneDigits = displayPhone ? normalizePhoneForTel(displayPhone) : null;
 
@@ -697,13 +799,14 @@ export default function HomePage() {
                   latitude: store.latitude ?? store.lat,
                   longitude: store.longitude ?? store.lng,
                   address: displayAddress,
+                  name: displayName,
                 });
 
                 const isHighRisk = highRiskStoreIds.includes(String(store.id));
 
                 return (
                   <li
-                    key={store.id ?? index}
+                    key={store.id || String(index)}
                     style={{
                       padding: '1.25rem',
                       borderRadius: 16,
@@ -733,22 +836,35 @@ export default function HomePage() {
                       </div>
                     )}
 
-                    {/* 在庫状況（コミュニティ） */}
                     {renderCommunityCompact(store)}
 
-                    <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid #f1f5f9', fontSize: '0.9rem' }}>
+                    <div
+                      style={{
+                        marginTop: '1rem',
+                        paddingTop: '1rem',
+                        borderTop: '1px solid #f1f5f9',
+                        fontSize: '0.9rem',
+                      }}
+                    >
                       <div style={{ marginBottom: '0.4rem' }}>
                         {mapUrl ? (
                           <a
                             href={mapUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            // ▼ 2. 住所クリックイベントを追加
-                            onClick={() => sendGAEvent('event', 'tap_address', { 
-                              store_name: displayName, 
-                              address_value: displayAddress 
-                            })}
-                            style={{ color: '#2563eb', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}
+                            onClick={() =>
+                              sendGAEvent('event', 'tap_address', {
+                                store_name: displayName,
+                                address_value: displayAddress,
+                              })
+                            }
+                            style={{
+                              color: '#2563eb',
+                              textDecoration: 'none',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 4,
+                            }}
                           >
                             📍 {displayAddress}
                           </a>
@@ -760,14 +876,21 @@ export default function HomePage() {
                       {displayPhone && (
                         <div>
                           {phoneDigits ? (
-                            <a 
-                              href={`tel:${phoneDigits}`} 
-                              // ▼ 3. 電話クリックイベントを追加
-                              onClick={() => sendGAEvent('event', 'tap_phone', { 
-                                store_name: displayName, 
-                                phone_value: displayPhone 
-                              })}
-                              style={{ color: '#2563eb', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}
+                            <a
+                              href={`tel:${phoneDigits}`}
+                              onClick={() =>
+                                sendGAEvent('event', 'tap_phone', {
+                                  store_name: displayName,
+                                  phone_value: displayPhone,
+                                })
+                              }
+                              style={{
+                                color: '#2563eb',
+                                textDecoration: 'none',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 4,
+                              }}
                             >
                               📞 {displayPhone}
                             </a>

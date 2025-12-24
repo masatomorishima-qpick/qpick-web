@@ -2,10 +2,56 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabaseClient';
 
+export const dynamic = 'force-dynamic';
+
+type ProductChain = 'all' | 'seven_eleven' | 'familymart' | 'lawson';
+
+type ProductRow = {
+  id: number;
+  name: string;
+  category: string | null;
+  chain: string | null;
+};
+
+type StoreRow = {
+  id: string;
+  chain: string; // nearby_stores で返ってくる前提（確認済み）
+  name: string | null;
+  address: string | null;
+  phone: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  distance_m: number | null;
+};
+
+type FlagRow = { store_id: string; status: 'found' | 'not_found' | string; created_at: string };
+
+type CommunityLabel = '買えた多め' | '売切れ多め' | 'データ少' | null;
+
+type StoreWithCommunity = StoreRow & {
+  community: {
+    windowDays: number;
+    found: number;
+    notFound: number;
+    total: number;
+    lastReportAt: string | null;
+    label: CommunityLabel;
+  };
+};
+
+function normalizeProductChain(v: unknown): ProductChain {
+  const s = String(v ?? 'all').trim().toLowerCase();
+  if (s === 'all') return 'all';
+  if (s === 'seven_eleven') return 'seven_eleven';
+  if (s === 'familymart') return 'familymart';
+  if (s === 'lawson') return 'lawson';
+  return 'all';
+}
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
 
-  // ★PoC方針：位置情報必須
+  // 位置情報必須
   const lat = Number(searchParams.get('lat'));
   const lng = Number(searchParams.get('lng'));
 
@@ -16,7 +62,7 @@ export async function GET(req: Request) {
     );
   }
 
-  // ★productId 必須（suggestで確定したものを渡す）
+  // productId 必須
   const productIdStr = (searchParams.get('productId') ?? '').trim();
   const productId = Number(productIdStr);
 
@@ -27,14 +73,10 @@ export async function GET(req: Request) {
     );
   }
 
-  // ------------------------------------------------
-  // 1) productId から product を取得（表示用）
-  // ------------------------------------------------
-  let productName: string | null = null;
-
-  const { data: product, error: productError } = await supabase
+  // 1) product取得（chain判定用）
+  const { data: productRaw, error: productError } = await supabase
     .from('products')
-    .select('id, name, category')
+    .select('id, name, category, chain')
     .eq('id', productId)
     .single();
 
@@ -52,19 +94,21 @@ export async function GET(req: Request) {
     );
   }
 
-  productName = product?.name ?? null;
+  const product = productRaw as unknown as ProductRow;
+  const productName = product?.name ?? null;
+  const productChain = normalizeProductChain(product?.chain);
 
-  // ------------------------------------------------
-  // 2) 近い stores を取得（distance_m 付き）
-  // ------------------------------------------------
-  const radius_m = 1500;
-  const limit_n = 10;
+  // 2) 近いstores取得（distance_m付き）
+  const radius_m = 5000;
 
-  const { data: stores, error: storeError } = await supabase.rpc('nearby_stores', {
+  // 限定商品はフィルタ後に減るので多めに取得してから絞る
+  const fetch_limit_n = productChain === 'all' ? 50 : 200;
+
+  const { data: storesRaw, error: storeError } = await supabase.rpc('nearby_stores', {
     in_lat: lat,
     in_lng: lng,
     radius_m,
-    limit_n,
+    limit_n: fetch_limit_n,
   });
 
   if (storeError) {
@@ -80,22 +124,27 @@ export async function GET(req: Request) {
     );
   }
 
-  const storesList: any[] = stores ?? [];
+  let storesList = (storesRaw ?? []) as unknown as StoreRow[];
 
-  // ------------------------------------------------
-  // 3) 店舗ごとの「みんなの結果（直近N日）」を作る
-  //    + 高リスク判定（売切れ多め）もこの集計から出す
-  // ------------------------------------------------
+  // チェーン限定なら store.chain で絞る
+  if (productChain !== 'all') {
+    storesList = storesList.filter((store) => {
+      const storeChain = String(store?.chain ?? '').trim().toLowerCase();
+      return storeChain === productChain;
+    });
+  }
+
+  // 最大50件まで表示
+  const DISPLAY_LIMIT = 50;
+  storesList = storesList.slice(0, DISPLAY_LIMIT);
+
+  // 3) みんなの結果集計
   const COMMUNITY_WINDOW_DAYS = 30;
   const COMMUNITY_MIN_SAMPLES = 5;
-
-  // 直近N日の開始日時（ISO）
   const since = new Date(Date.now() - COMMUNITY_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-  // デフォルト
   let highRiskStoreIds: string[] = [];
 
-  // store_id -> stats
   const statsByStore: Record<
     string,
     { found: number; notFound: number; lastReportAt: string | null }
@@ -104,8 +153,7 @@ export async function GET(req: Request) {
   if (storesList.length > 0) {
     const storeIds = storesList.map((s) => String(s.id));
 
-    // 直近N日 + 対象商品 + 対象店舗のみ
-    const { data: flags, error: flagsError } = await supabase
+    const { data: flagsRaw, error: flagsError } = await supabase
       .from('store_product_flags')
       .select('store_id, status, created_at')
       .eq('product_id', productId)
@@ -114,41 +162,38 @@ export async function GET(req: Request) {
 
     if (flagsError) {
       console.error('flags fetch error', flagsError);
-      // flags が取れない場合でも stores は返す（PoC優先）
-    } else if (flags) {
-      for (const row of flags as { store_id: string; status: string; created_at: string }[]) {
+    } else if (flagsRaw) {
+      const flags = flagsRaw as unknown as FlagRow[];
+
+      for (const row of flags) {
         const key = String(row.store_id);
         if (!statsByStore[key]) statsByStore[key] = { found: 0, notFound: 0, lastReportAt: null };
 
         if (row.status === 'found') statsByStore[key].found += 1;
         if (row.status === 'not_found') statsByStore[key].notFound += 1;
 
-        // 最新投稿日時（最大値）
         if (!statsByStore[key].lastReportAt || row.created_at > statsByStore[key].lastReportAt) {
           statsByStore[key].lastReportAt = row.created_at;
         }
       }
 
-      // 高リスク判定（直近N日で not_found >= 5 && found === 0）
       highRiskStoreIds = Object.entries(statsByStore)
         .filter(([, v]) => v.notFound >= 5 && v.found === 0)
         .map(([store_id]) => store_id);
     }
   }
 
-  // stores に community を埋め込む（page.tsx 側は必要なときだけ表示すればOK）
-  const storesWithCommunity = storesList.map((s) => {
+  const storesWithCommunity: StoreWithCommunity[] = storesList.map((s) => {
     const key = String(s.id);
     const st = statsByStore[key] ?? { found: 0, notFound: 0, lastReportAt: null };
 
     const total = st.found + st.notFound;
     const foundRate = total > 0 ? st.found / total : null;
 
-    // ラベル判定（UIでそのまま使える文字列にする）
-    let label: '買えた多め' | '売切れ多め' | 'データ少' | null = null;
+    let label: CommunityLabel = null;
 
     if (total === 0) {
-      label = null; // 表示は「投稿なし」などはUI側で
+      label = null;
     } else if (total < COMMUNITY_MIN_SAMPLES) {
       label = 'データ少';
     } else if (foundRate !== null && foundRate >= 0.7) {
@@ -171,10 +216,10 @@ export async function GET(req: Request) {
   });
 
   return NextResponse.json({
-    stores: storesWithCommunity, // ← store.community が追加される
+    stores: storesWithCommunity,
     productId,
     productName,
     highRiskStoreIds,
-    communityWindowDays: COMMUNITY_WINDOW_DAYS, // （任意：UI側で表示に使える）
+    communityWindowDays: COMMUNITY_WINDOW_DAYS,
   });
 }
