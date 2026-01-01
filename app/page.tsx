@@ -572,7 +572,7 @@ export default function HomePage() {
 
           <h1
             style={{
-              fontSize: '1.25rem',
+              fontSize: '1.15rem',
               fontWeight: 700,
               color: '#111827',
               margin: 0,
