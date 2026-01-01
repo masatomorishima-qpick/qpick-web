@@ -579,7 +579,7 @@ export default function HomePage() {
               lineHeight: 1.4,
             }}
           >
-            その新作、まだ近所にあるかも？
+            その商品、最寄りのコンビニにあるかも？
           </h1>
 
           <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>
@@ -613,7 +613,7 @@ export default function HomePage() {
                   setError(null);
                   setNotice(null);
                 }}
-                placeholder="商品名を入力（例：みそきん、猫プリン）"
+                placeholder="商品名を入力（例：手袋、ホッカイロ）"
                 style={{
                   width: '100%',
                   padding: '1rem 1.2rem',
