@@ -22,13 +22,15 @@ export const metadata: Metadata = {
 
   openGraph: {
     type: "website",
-    url: "/",
+    // ここは本番URLを明示しておくと安全（"/" でも動きますが、明示がより確実）
+    url: "https://qpick.net/",
     siteName: "Qpick",
     title: "Qpick",
     description: "今すぐ欲しいが見つかる",
     images: [
       {
-        url: "/og.png",
+        // ★白背景の新ロゴに差し替え（public/qpick_logo2.png）
+        url: "/qpick_logo2.png",
         width: 1200,
         height: 630,
         alt: "Qpick",
@@ -41,7 +43,8 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Qpick",
     description: "今すぐ欲しいが見つかる",
-    images: ["/og.png"],
+    // ★白背景の新ロゴに差し替え（public/qpick_logo2.png）
+    images: ["/qpick_logo2.png"],
   },
 };
 
