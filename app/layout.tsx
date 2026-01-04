@@ -31,8 +31,8 @@ export const metadata: Metadata = {
       {
         // ★白背景の新ロゴに差し替え（public/qpick_logo2.png）
         url: "/qpick_logo2.png",
-        width: 1200,
-        height: 630,
+        width: 861,
+        height: 333,
         alt: "Qpick",
       },
     ],
