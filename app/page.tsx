@@ -613,7 +613,7 @@ export default function HomePage() {
                   setError(null);
                   setNotice(null);
                 }}
-                placeholder="商品名を入力（例：手袋、ホッカイロ）"
+                placeholder="商品名の一部を入力（例：ちいかわ）"
                 style={{
                   width: '100%',
                   padding: '1rem 1.2rem',
