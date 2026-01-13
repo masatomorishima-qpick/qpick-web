@@ -566,7 +566,7 @@ export default function HomePage() {
                 borderRadius: 999,
               }}
             >
-              α版：東京23区限定（セブン・ファミマ・ローソン）
+              α版：東京・大阪エリア（セブン・ファミマ・ローソン）
             </span>
           </div>
 
