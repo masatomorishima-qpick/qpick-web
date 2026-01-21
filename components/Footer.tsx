@@ -23,7 +23,7 @@ export default function Footer() {
         </ul>
       </nav>
       <p style={styles.copyright}>
-        &copy; 2024 Blue Adventures All Rights Reserved.
+        &copy; 2026 Blue Adventures All Rights Reserved.
       </p>
     </footer>
   );

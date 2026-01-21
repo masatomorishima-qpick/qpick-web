@@ -49,14 +49,36 @@ type Store = {
   community?: StoreCommunity | null;
 };
 
+// -----------------------------
+// 位置情報ログ用：小数点2桁に丸める（約1km単位）
+// -----------------------------
+const roundCoord = (v: number, digits = 2) => {
+  const p = 10 ** digits;
+  return Math.round(v * p) / p;
+};
+
 // 検索ログ（RLSでINSERTのみ許可している前提）
-async function logSearch(params: { keyword: string; storeCountShown: number }) {
+// ※プライバシー配慮：lat/lng の生値は保存せず、lat_approx/lng_approx（小数点2桁）だけ保存
+async function logSearch(params: {
+  keyword: string;
+  storeCountShown: number;
+  latApprox: number | null;
+  lngApprox: number | null;
+  accuracyM?: number | null;
+  category?: string | null;
+  searchSource?: string | null;
+}) {
   const trimmed = params.keyword.trim();
   if (!trimmed) return;
 
   const { error } = await supabase.from('search_logs').insert({
     keyword: trimmed,
+    category: params.category ?? null,
     store_count_shown: params.storeCountShown,
+    search_source: params.searchSource ?? null,
+    lat_approx: params.latApprox,
+    lng_approx: params.lngApprox,
+    accuracy_m: params.accuracyM ?? null,
   });
 
   if (error) console.warn('search_logs insert failed:', error.message);
@@ -399,8 +421,17 @@ export default function HomePage() {
         maximumAge: 0,
       });
 
+      // 検索には「正確な現在地」を使う（結果精度のため）
       const lat = pos.coords.latitude;
       const lng = pos.coords.longitude;
+
+      // ログには「粗い座標（小数点2桁）」だけ保存（プライバシー配慮）
+      const latApprox = Number.isFinite(lat) ? roundCoord(lat, 2) : null;
+      const lngApprox = Number.isFinite(lng) ? roundCoord(lng, 2) : null;
+
+      const accuracyM = Number.isFinite(pos.coords.accuracy)
+        ? Math.round(pos.coords.accuracy)
+        : null;
 
       const params = new URLSearchParams({
         productId: String(c.id),
@@ -422,7 +453,10 @@ export default function HomePage() {
       }
 
       const storesFromApi =
-        typeof json === 'object' && json !== null && 'stores' in json && Array.isArray((json as { stores?: unknown }).stores)
+        typeof json === 'object' &&
+        json !== null &&
+        'stores' in json &&
+        Array.isArray((json as { stores?: unknown }).stores)
           ? ((json as { stores: unknown[] }).stores as Store[])
           : [];
 
@@ -432,7 +466,10 @@ export default function HomePage() {
           : NaN;
 
       const apiHighRisk =
-        typeof json === 'object' && json !== null && 'highRiskStoreIds' in json && Array.isArray((json as { highRiskStoreIds?: unknown }).highRiskStoreIds)
+        typeof json === 'object' &&
+        json !== null &&
+        'highRiskStoreIds' in json &&
+        Array.isArray((json as { highRiskStoreIds?: unknown }).highRiskStoreIds)
           ? ((json as { highRiskStoreIds: unknown[] }).highRiskStoreIds as string[])
           : [];
 
@@ -443,13 +480,19 @@ export default function HomePage() {
 
       if (storesFromApi.length === 0) {
         setNotice(
-          `現在地から${RADIUS_KM}km以内に店舗が見つかりませんでした。※現在、α版のため「東京23区内の主要コンビニ」のみが対象です。`
+          `現在地から${RADIUS_KM}km以内に店舗が見つかりませんでした。※現在、α版のため「東京エリア・大阪エリアのセブンイレブン・ファミリーマート・ローソン」が対象です。`
         );
       }
 
+      // ★検索ログ（0件でも残る）＋位置は約1km単位で保存
       await logSearch({
         keyword: c.name,
         storeCountShown: storesFromApi.length,
+        latApprox,
+        lngApprox,
+        accuracyM,
+        category: c.category ?? null,
+        searchSource: null,
       });
     } catch (err: unknown) {
       // 位置情報系エラー（Geolocation）
