@@ -57,6 +57,10 @@ const roundCoord = (v: number, digits = 2) => {
   return Math.round(v * p) / p;
 };
 
+// ★オーナー相談フォーム（トップ導線用）
+const OWNER_FORM_URL =
+  'https://docs.google.com/forms/d/e/1FAIpQLSesiwtfNBHr1XByAE9_ObRyPJJlnqHvIg8Key1iuKDAg-A86A/viewform?usp=dialog';
+
 // 検索ログ（RLSでINSERTのみ許可している前提）
 // ※プライバシー配慮：lat/lng の生値は保存せず、lat_approx/lng_approx（小数点2桁）だけ保存
 async function logSearch(params: {
@@ -796,6 +800,65 @@ export default function HomePage() {
               </div>
             )}
           </form>
+        </div>
+
+        {/* オーナー向け導線（検索窓の後） */}
+        <div
+          style={{
+            marginTop: '1.6rem',
+            textAlign: 'center',
+          }}
+        >
+  {/* 区切り（任意：別コンテンツ感を強める） */}
+  <div
+    style={{
+      height: 1,
+      backgroundColor: '#e2e8f0',
+      margin: '0 auto 1rem',
+      width: '70%',
+      borderRadius: 999,
+    }}
+  />
+
+  <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>店舗様向け</div>
+
+<a
+  href={OWNER_FORM_URL}
+  target="_blank"
+  rel="noopener noreferrer"
+  onClick={() =>
+    sendGAEvent('event', 'owner_form_click', {
+      placement: 'after_search_box',
+    })
+  }
+  style={{
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    padding: '0.75rem 1.1rem',
+    borderRadius: 999,
+    border: '1px solid #fdba74',
+    backgroundColor: '#fff7ed',
+    color: '#9a3412',
+    textDecoration: 'none',
+    fontSize: '0.95rem',
+    fontWeight: 800,
+    boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+  }}
+  onMouseOver={(e) => {
+    e.currentTarget.style.backgroundColor = '#ffedd5';
+  }}
+  onMouseOut={(e) => {
+    e.currentTarget.style.backgroundColor = '#fff7ed';
+  }}
+>
+            在庫連携はこちら
+          </a>
+
+          <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
+            無料トライアル実施中。店舗名・住所公開が参加条件です。
+          </div>
         </div>
 
         {(hasSearched || loading) && (
