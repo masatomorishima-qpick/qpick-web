@@ -14,19 +14,23 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const SITE_TITLE = "Qpick | 口コミでコンビニ在庫（買えた/買えなかった）共有サービス";
+const SITE_DESCRIPTION =
+  "口コミで近くのコンビニ在庫を共有。買えた/買えなかった投稿で探し物を最短で見つける。α版の現在は、東京・大阪エリアのセブンイレブン/ファミリーマート（ファミマ）/ローソンに対応。";
+
 // ★X（Twitter）でリンク投稿した時にロゴカードを出すための設定
 export const metadata: Metadata = {
   metadataBase: new URL("https://qpick.net"),
-  title: "Qpick",
-  description: "今すぐ欲しいが見つかる",
+  title: SITE_TITLE,
+  description: SITE_DESCRIPTION,
 
   openGraph: {
     type: "website",
     // ここは本番URLを明示しておくと安全（"/" でも動きますが、明示がより確実）
     url: "https://qpick.net/",
     siteName: "Qpick",
-    title: "Qpick",
-    description: "今すぐ欲しいが見つかる",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
     images: [
       {
         // ★白背景の新ロゴに差し替え（public/qpick_logo2.png）
@@ -41,8 +45,8 @@ export const metadata: Metadata = {
 
   twitter: {
     card: "summary_large_image",
-    title: "Qpick",
-    description: "今すぐ欲しいが見つかる",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
     // ★白背景の新ロゴに差し替え（public/qpick_logo2.png）
     images: ["/qpick_logo2.png"],
   },
@@ -61,10 +65,10 @@ export default function RootLayout({
 
         {/* フッターを表示 */}
         <Footer />
-      </body>
 
-      {/* Google Analytics（この位置でも動きますが、気になる場合は <body> 内に移動でもOKです） */}
-      <GoogleAnalytics gaId="G-SHV630HE2L" />
+        {/* Google Analytics */}
+        <GoogleAnalytics gaId="G-SHV630HE2L" />
+      </body>
     </html>
   );
 }
