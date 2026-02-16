@@ -49,44 +49,9 @@ type Store = {
   community?: StoreCommunity | null;
 };
 
-// -----------------------------
-// 位置情報ログ用：小数点2桁に丸める（約1km単位）
-// -----------------------------
-const roundCoord = (v: number, digits = 2) => {
-  const p = 10 ** digits;
-  return Math.round(v * p) / p;
-};
-
 // ★オーナー相談フォーム（トップ導線用）
 const OWNER_FORM_URL =
   'https://docs.google.com/forms/d/e/1FAIpQLSesiwtfNBHr1XByAE9_ObRyPJJlnqHvIg8Key1iuKDAg-A86A/viewform?usp=dialog';
-
-// 検索ログ（RLSでINSERTのみ許可している前提）
-// ※プライバシー配慮：lat/lng の生値は保存せず、lat_approx/lng_approx（小数点2桁）だけ保存
-async function logSearch(params: {
-  keyword: string;
-  storeCountShown: number;
-  latApprox: number | null;
-  lngApprox: number | null;
-  accuracyM?: number | null;
-  category?: string | null;
-  searchSource?: string | null;
-}) {
-  const trimmed = params.keyword.trim();
-  if (!trimmed) return;
-
-  const { error } = await supabase.from('search_logs').insert({
-    keyword: trimmed,
-    category: params.category ?? null,
-    store_count_shown: params.storeCountShown,
-    search_source: params.searchSource ?? null,
-    lat_approx: params.latApprox,
-    lng_approx: params.lngApprox,
-    accuracy_m: params.accuracyM ?? null,
-  });
-
-  if (error) console.warn('search_logs insert failed:', error.message);
-}
 
 // 追加要望ログ（product_requests に INSERTするだけ）
 async function logProductRequest(keyword: string) {
@@ -409,6 +374,7 @@ export default function HomePage() {
 
   // -----------------------------
   // 店舗検索（検索ボタン）
+  // ※ search_logs は API 側で一元管理する（ここではログINSERTしない）
   // -----------------------------
   const runSearch = async (c: Candidate) => {
     setLoading(true);
@@ -428,14 +394,6 @@ export default function HomePage() {
       // 検索には「正確な現在地」を使う（結果精度のため）
       const lat = pos.coords.latitude;
       const lng = pos.coords.longitude;
-
-      // ログには「粗い座標（小数点2桁）」だけ保存（プライバシー配慮）
-      const latApprox = Number.isFinite(lat) ? roundCoord(lat, 2) : null;
-      const lngApprox = Number.isFinite(lng) ? roundCoord(lng, 2) : null;
-
-      const accuracyM = Number.isFinite(pos.coords.accuracy)
-        ? Math.round(pos.coords.accuracy)
-        : null;
 
       const params = new URLSearchParams({
         productId: String(c.id),
@@ -487,17 +445,6 @@ export default function HomePage() {
           `現在地から${RADIUS_KM}km以内に店舗が見つかりませんでした。※現在、α版のため「東京エリア・大阪エリアのセブンイレブン・ファミリーマート・ローソン」が対象です。`
         );
       }
-
-      // ★検索ログ（0件でも残る）＋位置は約1km単位で保存
-      await logSearch({
-        keyword: c.name,
-        storeCountShown: storesFromApi.length,
-        latApprox,
-        lngApprox,
-        accuracyM,
-        category: c.category ?? null,
-        searchSource: null,
-      });
     } catch (err: unknown) {
       // 位置情報系エラー（Geolocation）
       if (isGeoError(err)) {
@@ -809,50 +756,50 @@ export default function HomePage() {
             textAlign: 'center',
           }}
         >
-  {/* 区切り（任意：別コンテンツ感を強める） */}
-  <div
-    style={{
-      height: 1,
-      backgroundColor: '#e2e8f0',
-      margin: '0 auto 1rem',
-      width: '70%',
-      borderRadius: 999,
-    }}
-  />
+          {/* 区切り（任意：別コンテンツ感を強める） */}
+          <div
+            style={{
+              height: 1,
+              backgroundColor: '#e2e8f0',
+              margin: '0 auto 1rem',
+              width: '70%',
+              borderRadius: 999,
+            }}
+          />
 
-  <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>店舗様向け</div>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>店舗様向け</div>
 
-<a
-  href={OWNER_FORM_URL}
-  target="_blank"
-  rel="noopener noreferrer"
-  onClick={() =>
-    sendGAEvent('event', 'owner_form_click', {
-      placement: 'after_search_box',
-    })
-  }
-  style={{
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    padding: '0.75rem 1.1rem',
-    borderRadius: 999,
-    border: '1px solid #fdba74',
-    backgroundColor: '#fff7ed',
-    color: '#9a3412',
-    textDecoration: 'none',
-    fontSize: '0.95rem',
-    fontWeight: 800,
-    boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
-  }}
-  onMouseOver={(e) => {
-    e.currentTarget.style.backgroundColor = '#ffedd5';
-  }}
-  onMouseOut={(e) => {
-    e.currentTarget.style.backgroundColor = '#fff7ed';
-  }}
->
+          <a
+            href={OWNER_FORM_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() =>
+              sendGAEvent('event', 'owner_form_click', {
+                placement: 'after_search_box',
+              })
+            }
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              padding: '0.75rem 1.1rem',
+              borderRadius: 999,
+              border: '1px solid #fdba74',
+              backgroundColor: '#fff7ed',
+              color: '#9a3412',
+              textDecoration: 'none',
+              fontSize: '0.95rem',
+              fontWeight: 800,
+              boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+            }}
+            onMouseOver={(e) => {
+              e.currentTarget.style.backgroundColor = '#ffedd5';
+            }}
+            onMouseOut={(e) => {
+              e.currentTarget.style.backgroundColor = '#fff7ed';
+            }}
+          >
             在庫連携はこちら
           </a>
 
