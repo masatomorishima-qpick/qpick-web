@@ -69,7 +69,7 @@ function chainJa(chain: unknown): string {
 }
 
 /**
- * SEO metadata（店舗名を含める）
+ * SEO metadata
  */
 export async function generateMetadata({ params }: { params: Params }) {
   const { pref: prefRaw, city: cityRaw, slug: slugRaw } = await params;
@@ -102,7 +102,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
   const cityParam = decodeURIComponent(cityRaw).trim();
   const slugParam = decodeURIComponent(slugRaw).trim();
 
-  // 表示用pref名（大阪府など）
   const { data: prefRow } = await supabase
     .from('prefectures')
     .select('name')
@@ -110,17 +109,17 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
     .maybeSingle();
   const prefName = (prefRow as any)?.name ?? prefParam;
 
-  // 1) 店舗取得（slugで一意）
   const { data: storeRaw, error: storeError } = await supabase
     .from('stores')
     .select('id, chain, name, address, phone, latitude, longitude, pref, city, slug, note')
     .eq('slug', slugParam)
     .single();
 
-  if (storeError || !storeRaw) return notFound();
+  // ★ここ：return notFound() ではなく notFound() を呼ぶ
+  if (storeError || !storeRaw) notFound();
+
   const store = storeRaw as unknown as StoreRow;
 
-  // 2) 正規URLへ寄せる
   const canonicalPref = safeText(store.pref) ? safeText(store.pref).toLowerCase() : prefParam;
   const canonicalCity = safeText(store.city) ? safeText(store.city) : cityParam;
   const canonicalSlug = safeText(store.slug) ? safeText(store.slug) : slugParam;
@@ -135,7 +134,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
   const address = store.address ?? '';
   const mapUrl = buildMapUrl(storeName, address);
 
-  // 3) 店舗全体の買えた率（直近30日）
   const DAYS = 30;
 
   const { data: overallArr } = await supabase.rpc('store_overall_stats', {
@@ -145,12 +143,11 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
 
   const overall = Array.isArray(overallArr) && overallArr[0] ? (overallArr[0] as any) : null;
   const found = Number(overall?.found ?? 0);
-  const notFound = Number(overall?.not_found ?? 0);
+  const notFoundCount = Number(overall?.not_found ?? 0);
   const total = Number(overall?.total ?? 0);
   const lastReportAt = overall?.last_report_at ? String(overall.last_report_at) : null;
   const foundPct = fmtPct(found, total);
 
-  // 4) 商品別の買えた率（直近30日・上位20）
   const { data: prodStatsRaw } = await supabase.rpc('store_product_stats', {
     in_store_id: store.id,
     in_days: DAYS,
@@ -158,7 +155,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
   });
   const prodStats = Array.isArray(prodStatsRaw) ? (prodStatsRaw as any[]) : [];
 
-  // 5) コメント（最新20）
   const { data: fbRaw } = await supabase
     .from('feedback')
     .select('created_at, comment, product_id')
@@ -177,7 +173,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
     }
   }
 
-  // 6) エリアの検索上位（直近30日）
   const { data: topKwRaw } = await supabase.rpc('area_top_keywords', {
     in_pref: canonicalPref,
     in_city: canonicalCity,
@@ -186,9 +181,15 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
   });
   const topKeywords = Array.isArray(topKwRaw) ? (topKwRaw as any[]) : [];
 
-  // 7) 近隣店舗リンク（この店舗の緯度経度から “距離順” に取得）
-  //    - まず1.5km、足りなければ5kmへ拡張
-  let nearStores: Array<{ id: string; name: string; slug: string; address: string | null; chain: string | null; distance_m: number | null }> = [];
+  // 近隣店舗（距離順）
+  let nearStores: Array<{
+    id: string;
+    name: string;
+    slug: string;
+    address: string | null;
+    chain: string | null;
+    distance_m: number | null;
+  }> = [];
 
   const lat = Number(store.latitude);
   const lng = Number(store.longitude);
@@ -210,21 +211,16 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
     const second = first.length >= 12 ? first : await fetchNear(5000, 50);
     const picked = (second.length > 0 ? second : first).slice(0, 12);
 
-    // slugを付けるために stores を再取得
     const ids = picked.map((r) => String(r.id));
     const distById = new Map<string, number | null>();
     for (const r of picked) distById.set(String(r.id), r.distance_m ?? null);
 
     if (ids.length > 0) {
-      const { data: storesRaw } = await supabase
-        .from('stores')
-        .select('id, name, slug, address, chain')
-        .in('id', ids);
+      const { data: storesRaw } = await supabase.from('stores').select('id, name, slug, address, chain').in('id', ids);
 
       const byId = new Map<string, any>();
       for (const s of (storesRaw ?? []) as any[]) byId.set(String(s.id), s);
 
-      // distance順を維持して整形
       nearStores = ids
         .map((id) => {
           const s = byId.get(id);
@@ -241,7 +237,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
         .filter(Boolean) as any[];
     }
   } else {
-    // 緯度経度が無い場合のフォールバック：同市区町村の別店舗を固定順で
     const { data: nearFallback } = await supabase
       .from('stores')
       .select('id, name, slug, address, chain')
@@ -264,7 +259,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
     nearStores = nearStores.filter((s) => !!s.slug);
   }
 
-  // UI style
   const breadcrumbLink: React.CSSProperties = { color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2 };
   const linkStyle: React.CSSProperties = { color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2, fontWeight: 800 };
   const card: React.CSSProperties = { padding: '12px 12px', borderRadius: 14, border: '1px solid #e2e8f0', background: '#fff' };
@@ -299,7 +293,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
             )}
           </div>
           <div>電話：{store.phone ?? '-'}</div>
-          {/* note(place_idなど)は表示しない */}
         </div>
       </section>
 
@@ -320,7 +313,7 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
         ) : (
           <div style={{ color: '#334155', lineHeight: 1.9 }}>
             <div>
-              買えた：<b>{found}</b> ／ 売切れ：<b>{notFound}</b> ／ 合計：<b>{total}</b>
+              買えた：<b>{found}</b> ／ 売切れ：<b>{notFoundCount}</b> ／ 合計：<b>{total}</b>
               {foundPct !== null && <span> ／ 買えた率：<b>{foundPct}%</b></span>}
             </div>
             {lastReportAt && <div style={{ color: '#64748b', fontSize: 14 }}>最終更新：{lastReportAt}</div>}
@@ -393,10 +386,7 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
           <ul style={{ margin: 0, paddingLeft: 18 }}>
             {nearStores.map((s, i) => (
               <li key={`${s.slug}-${i}`} style={{ margin: '8px 0' }}>
-                <Link
-                  href={`/${encodeURIComponent(canonicalPref)}/${encodeURIComponent(canonicalCity)}/${encodeURIComponent(s.slug)}`}
-                  style={linkStyle}
-                >
+                <Link href={`/${encodeURIComponent(canonicalPref)}/${encodeURIComponent(canonicalCity)}/${encodeURIComponent(s.slug)}`} style={linkStyle}>
                   {s.name}
                 </Link>
                 <div style={{ color: '#64748b', fontSize: 13, marginTop: 2 }}>
