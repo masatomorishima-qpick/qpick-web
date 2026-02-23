@@ -749,6 +749,46 @@ export default function HomePage() {
           </form>
         </div>
 
+{/* エリア別店舗情報（店舗向け導線の上） */}
+<div style={{ marginTop: '1.6rem', textAlign: 'center' }}>
+  <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>
+    エリア別の店舗情報
+  </div>
+
+  <a
+    href="/areas"
+    onClick={() =>
+      sendGAEvent('event', 'area_pages_click', {
+        placement: 'above_owner_section',
+      })
+    }
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      padding: '0.75rem 1.1rem',
+      borderRadius: 999,
+      border: '1px solid #bfdbfe',
+      backgroundColor: '#eff6ff',
+      color: '#1d4ed8',
+      textDecoration: 'underline',
+      textUnderlineOffset: 2,
+      fontSize: '0.95rem',
+      fontWeight: 800,
+      boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
+      cursor: 'pointer',
+    }}
+  >
+    エリア別店舗情報はこちら
+  </a>
+
+  <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
+    都道府県 → 市区町村 → 店舗詳細（買えた率/コメント）
+  </div>
+</div>
+
+
         {/* オーナー向け導線（検索窓の後） */}
         <div
           style={{
