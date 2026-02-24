@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { GoogleAnalytics } from "@next/third-parties/google";
 import "./globals.css";
 import Footer from "@/components/Footer";
+import AppHeader from "@/components/AppHeader";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -59,7 +60,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ja">
-      <body className={`${geistSans.variable} ${geistMono.variable}`}>
+      <body className={`${geistSans.variable} ${geistMono.variable}`} style={{ margin: 0 }}>
+        {/* 全ページ共通ヘッダー（ロゴ表示） */}
+        <AppHeader />
+
         {/* メインコンテンツエリア：画面の高さの最低80%を確保してフッターを下に押し下げる */}
         <main style={{ minHeight: "80vh" }}>{children}</main>
 

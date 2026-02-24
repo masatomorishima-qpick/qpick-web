@@ -536,16 +536,7 @@ export default function HomePage() {
             textAlign: 'center',
           }}
         >
-          <div style={{ marginBottom: '1rem' }}>
-            <Image
-              src="/qpick_logo.png"
-              alt="Qpick"
-              width={160}
-              height={62}
-              priority
-              style={{ height: 'auto', objectFit: 'contain' }}
-            />
-          </div>
+          
 
           <div style={{ marginBottom: '1rem' }}>
             <span
