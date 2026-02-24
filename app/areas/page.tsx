@@ -2,7 +2,9 @@
 import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 
-export const dynamic = 'force-dynamic';
+// ✅ 1時間キャッシュ（都道府県一覧は頻繁に変わらない想定）
+// ※「即時反映したい」場合は、この行を削除して dynamic='force-dynamic' に戻してください
+export const revalidate = 3600;
 
 export async function generateMetadata() {
   return {
@@ -13,29 +15,52 @@ export async function generateMetadata() {
   };
 }
 
-// storesからpref一覧を集める（ページング）
+// stores から pref 一覧を集める（ページング）
+// ✅ 改善点：先に件数を取り、ページを「バッチ並列」で取りに行く（逐次ループより速い）
 async function fetchPrefSlugsFromStores() {
   const PAGE_SIZE = 1000;
-  let from = 0;
+  const CONCURRENCY = 6; // 同時実行数（増やしすぎると逆に遅くなるので控えめ）
+
+  // 1) 件数だけ取得（データは取らない）
+  const { count, error: countError } = await supabase
+    .from('stores')
+    .select('pref', { count: 'exact', head: true })
+    .not('pref', 'is', null);
+
+  if (countError) throw new Error(countError.message);
+
+  const total = Number(count ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return [];
+
+  const pages = Math.ceil(total / PAGE_SIZE);
   const set = new Set<string>();
 
-  while (true) {
-    const { data, error } = await supabase
-      .from('stores')
-      .select('pref')
-      .not('pref', 'is', null)
-      .range(from, from + PAGE_SIZE - 1);
+  // 2) バッチ並列でprefを取得
+  for (let startPage = 0; startPage < pages; startPage += CONCURRENCY) {
+    const batch = Array.from({ length: Math.min(CONCURRENCY, pages - startPage) }, (_, i) => startPage + i);
 
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
+    const results = await Promise.all(
+      batch.map(async (page) => {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
 
-    for (const row of data as any[]) {
-      const p = String(row.pref ?? '').trim().toLowerCase();
-      if (p) set.add(p);
+        const { data, error } = await supabase
+          .from('stores')
+          .select('pref')
+          .not('pref', 'is', null)
+          .range(from, to);
+
+        if (error) throw new Error(error.message);
+        return data ?? [];
+      })
+    );
+
+    for (const rows of results) {
+      for (const row of rows as any[]) {
+        const p = String(row.pref ?? '').trim().toLowerCase();
+        if (p) set.add(p);
+      }
     }
-
-    if (data.length < PAGE_SIZE) break;
-    from += PAGE_SIZE;
   }
 
   return Array.from(set).sort();
@@ -44,10 +69,12 @@ async function fetchPrefSlugsFromStores() {
 export default async function AreasPage() {
   const prefSlugs = await fetchPrefSlugsFromStores();
 
-  const { data: prefNamesRaw } = await supabase
+  const { data: prefNamesRaw, error: prefNamesError } = await supabase
     .from('prefectures')
     .select('slug, name')
     .in('slug', prefSlugs);
+
+  if (prefNamesError) throw new Error(prefNamesError.message);
 
   const nameBySlug = new Map<string, string>();
   for (const r of (prefNamesRaw ?? []) as any[]) {
@@ -71,7 +98,12 @@ export default async function AreasPage() {
   return (
     <main style={{ maxWidth: 980, margin: '0 auto', padding: '24px 16px' }}>
       <nav style={{ fontSize: 14, color: '#64748b' }}>
-        <Link href="/" style={{ color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2 }}>
+        {/* ✅ 内部リンクは Link。さらに ✅ prefetch を止める（大量 ?_rsc を防ぐ） */}
+        <Link
+          href="/"
+          prefetch={false}
+          style={{ color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2 }}
+        >
           Home
         </Link>{' '}
         {' > '} <span>エリア別店舗情報</span>
@@ -87,7 +119,12 @@ export default async function AreasPage() {
         <h2 style={{ fontSize: 18, margin: '0 0 10px 0' }}>都道府県</h2>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
           {prefSlugs.map((slug) => (
-            <Link key={slug} href={`/${encodeURIComponent(slug)}`} style={linkStyle}>
+            <Link
+              key={slug}
+              href={`/${encodeURIComponent(slug)}`}
+              prefetch={false} // ✅ これがアクションA（都道府県リンクの自動prefetchを止める）
+              style={linkStyle}
+            >
               {nameBySlug.get(slug) ?? slug}
             </Link>
           ))}

@@ -3,7 +3,9 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 
-export const dynamic = 'force-dynamic';
+// ✅ キャッシュ（市区町村→店舗一覧は頻繁に変わらない想定）
+// ※「即時反映が必要」なら、この行を削除して dynamic='force-dynamic' に戻してください
+export const revalidate = 3600;
 
 type Params = Promise<{ pref: string; city: string }>;
 
@@ -46,6 +48,121 @@ function sortByAddressThenName(a: StoreListRow, b: StoreListRow) {
   return an.localeCompare(bn, 'ja');
 }
 
+// ✅ stores 件数を先に取って、ページングを「バッチ並列」で実行（逐次 while より速い）
+async function fetchStoresByPrefCity(prefSlug: string, city: string) {
+  const PAGE_SIZE = 1000;
+  const CONCURRENCY = 6;
+
+  const { count, error: countError } = await supabase
+    .from('stores')
+    .select('id', { count: 'exact', head: true })
+    .eq('pref', prefSlug)
+    .eq('city', city);
+
+  if (countError) throw new Error(countError.message);
+
+  const total = Number(count ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return [];
+
+  const pages = Math.ceil(total / PAGE_SIZE);
+  const out: StoreListRow[] = [];
+
+  for (let start = 0; start < pages; start += CONCURRENCY) {
+    const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
+
+    const results = await Promise.all(
+      batch.map(async (page) => {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+
+        const { data, error } = await supabase
+          .from('stores')
+          .select('id, chain, name, address, phone, slug')
+          .eq('pref', prefSlug)
+          .eq('city', city)
+          .order('address', { ascending: true })
+          .order('name', { ascending: true })
+          .range(from, to);
+
+        if (error) throw new Error(error.message);
+        return (data ?? []) as unknown as StoreListRow[];
+      })
+    );
+
+    for (const rows of results) out.push(...rows);
+  }
+
+  return out;
+}
+
+// ✅ 同一pref内の city 件数集計（他市区町村リンク用）もバッチ並列
+async function fetchCityCountsByPref(prefSlug: string) {
+  const PAGE_SIZE = 1000;
+  const CONCURRENCY = 6;
+
+  const { count, error: countError } = await supabase
+    .from('stores')
+    .select('city', { count: 'exact', head: true })
+    .eq('pref', prefSlug)
+    .not('city', 'is', null);
+
+  if (countError) throw new Error(countError.message);
+
+  const total = Number(count ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return new Map<string, number>();
+
+  const pages = Math.ceil(total / PAGE_SIZE);
+  const cityCount = new Map<string, number>();
+
+  for (let start = 0; start < pages; start += CONCURRENCY) {
+    const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
+
+    const results = await Promise.all(
+      batch.map(async (page) => {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+
+        const { data, error } = await supabase
+          .from('stores')
+          .select('city')
+          .eq('pref', prefSlug)
+          .not('city', 'is', null)
+          .range(from, to);
+
+        if (error) throw new Error(error.message);
+        return data ?? [];
+      })
+    );
+
+    for (const rows of results) {
+      for (const row of rows as any[]) {
+        const c = safeText(row.city);
+        if (!c) continue;
+        cityCount.set(c, (cityCount.get(c) ?? 0) + 1);
+      }
+    }
+  }
+
+  return cityCount;
+}
+
+// ✅ 他都道府県リンクは stores 全件走査をやめ、prefectures から取得（速度優先）
+async function fetchPrefecturesIndex() {
+  const { data, error } = await supabase.from('prefectures').select('slug, name').order('name', { ascending: true });
+  if (error) throw new Error(error.message);
+
+  const prefNameBySlug = new Map<string, string>();
+  const slugs: string[] = [];
+  for (const r of (data ?? []) as any[]) {
+    const slug = String(r.slug ?? '').trim().toLowerCase();
+    const name = String(r.name ?? '').trim();
+    if (!slug) continue;
+    slugs.push(slug);
+    if (name) prefNameBySlug.set(slug, name);
+  }
+  return { slugs, prefNameBySlug };
+}
+
 /**
  * SEO: title / description
  */
@@ -54,11 +171,13 @@ export async function generateMetadata({ params }: { params: Params }) {
   const prefSlug = decodeURIComponent(prefRaw).trim().toLowerCase();
   const city = decodeURIComponent(cityRaw).trim();
 
-  const { data: prefRow } = await supabase
+  const { data: prefRow, error: prefErr } = await supabase
     .from('prefectures')
     .select('name')
     .eq('slug', prefSlug)
     .maybeSingle();
+
+  if (prefErr) throw new Error(prefErr.message);
 
   const prefName = (prefRow as any)?.name ?? prefSlug;
 
@@ -76,40 +195,20 @@ export default async function CityPage({ params }: { params: Params }) {
   const prefSlug = decodeURIComponent(prefRaw).trim().toLowerCase();
   const city = decodeURIComponent(cityRaw).trim();
 
-  const { data: prefRow } = await supabase
+  const { data: prefRow, error: prefErr } = await supabase
     .from('prefectures')
     .select('name')
     .eq('slug', prefSlug)
     .maybeSingle();
+
+  if (prefErr) throw new Error(prefErr.message);
+
   const prefName = (prefRow as any)?.name ?? prefSlug;
 
   // ------------------------------------
-  // 1) この市区町村の店舗一覧（ページング）
+  // 1) この市区町村の店舗一覧（バッチ並列）
   // ------------------------------------
-  const PAGE_SIZE = 1000;
-  let from = 0;
-  const storesAll: StoreListRow[] = [];
-
-  while (true) {
-    const { data, error } = await supabase
-      .from('stores')
-      .select('id, chain, name, address, phone, slug')
-      .eq('pref', prefSlug)
-      .eq('city', city)
-      // DB側でも一応並べる（ただし最終的なチェーン別整列はJSで実施）
-      .order('address', { ascending: true })
-      .order('name', { ascending: true })
-      .range(from, from + PAGE_SIZE - 1);
-
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
-
-    storesAll.push(...(data as unknown as StoreListRow[]));
-
-    if (data.length < PAGE_SIZE) break;
-    from += PAGE_SIZE;
-  }
-
+  const storesAll = await fetchStoresByPrefCity(prefSlug, city);
   if (storesAll.length === 0) return notFound();
 
   // ------------------------------------
@@ -124,7 +223,6 @@ export default async function CityPage({ params }: { params: Params }) {
 
   for (const s of storesAll) groups[chainKey(s.chain)].push(s);
 
-  // 各チェーン内の並び：住所 → 店名
   for (const k of Object.keys(groups)) {
     groups[k].sort(sortByAddressThenName);
   }
@@ -140,29 +238,7 @@ export default async function CityPage({ params }: { params: Params }) {
   // ------------------------------------
   // 3) 他市区町村リンク（同pref内）
   // ------------------------------------
-  const cityCount = new Map<string, number>();
-  from = 0;
-
-  while (true) {
-    const { data, error } = await supabase
-      .from('stores')
-      .select('city')
-      .eq('pref', prefSlug)
-      .not('city', 'is', null)
-      .range(from, from + PAGE_SIZE - 1);
-
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
-
-    for (const row of data as any[]) {
-      const c = safeText(row.city);
-      if (!c) continue;
-      cityCount.set(c, (cityCount.get(c) ?? 0) + 1);
-    }
-
-    if (data.length < PAGE_SIZE) break;
-    from += PAGE_SIZE;
-  }
+  const cityCount = await fetchCityCountsByPref(prefSlug);
 
   const otherCities = Array.from(cityCount.entries())
     .filter(([c]) => c !== city)
@@ -170,45 +246,9 @@ export default async function CityPage({ params }: { params: Params }) {
     .slice(0, 20);
 
   // ------------------------------------
-  // 4) 他都道府県リンク
+  // 4) 他都道府県リンク（prefecturesから取得）
   // ------------------------------------
-  const prefStats = new Map<string, number>();
-  from = 0;
-
-  while (true) {
-    const { data, error } = await supabase
-      .from('stores')
-      .select('pref')
-      .not('pref', 'is', null)
-      .range(from, from + PAGE_SIZE - 1);
-
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
-
-    for (const row of data as any[]) {
-      const p = safeText(row.pref).toLowerCase();
-      if (!p) continue;
-      prefStats.set(p, (prefStats.get(p) ?? 0) + 1);
-    }
-
-    if (data.length < PAGE_SIZE) break;
-    from += PAGE_SIZE;
-  }
-
-  const allPrefSlugs = Array.from(prefStats.entries())
-    .map(([p]) => p)
-    .sort((a, b) => a.localeCompare(b));
-
-  const { data: prefNamesRaw } = await supabase
-    .from('prefectures')
-    .select('slug, name')
-    .in('slug', allPrefSlugs);
-
-  const prefNameBySlug = new Map<string, string>();
-  for (const r of (prefNamesRaw ?? []) as any[]) {
-    prefNameBySlug.set(String(r.slug), String(r.name));
-  }
-
+  const { slugs: allPrefSlugs, prefNameBySlug } = await fetchPrefecturesIndex();
   const otherPrefs = allPrefSlugs.filter((p) => p !== prefSlug).slice(0, 12);
 
   // ------------------------------------
@@ -259,19 +299,27 @@ export default async function CityPage({ params }: { params: Params }) {
     <main style={{ maxWidth: 980, margin: '0 auto', padding: '24px 16px' }}>
       {/* パンくず */}
       <nav style={{ fontSize: 14, color: '#64748b' }}>
-        <Link href="/" style={breadcrumbLink}>Home</Link> {' > '}
-        <Link href={`/${encodeURIComponent(prefSlug)}`} style={breadcrumbLink}>{prefName}</Link> {' > '}
+        <Link href="/" prefetch={false} style={breadcrumbLink}>
+          Home
+        </Link>{' '}
+        {' > '}
+        <Link href={`/${encodeURIComponent(prefSlug)}`} prefetch={false} style={breadcrumbLink}>
+          {prefName}
+        </Link>{' '}
+        {' > '}
         <span>{city}</span>
       </nav>
 
       {/* H1 */}
       <h1 style={{ fontSize: 28, marginTop: 12, lineHeight: 1.3 }}>
-        {prefName}{city}のコンビニ店舗一覧
+        {prefName}
+        {city}のコンビニ店舗一覧
       </h1>
 
       {/* 導入 */}
       <p style={{ marginTop: 10, color: '#475569', lineHeight: 1.8 }}>
-        {prefName}{city}のコンビニ店舗を一覧化しています。チェーン別（セブン-イレブン／ファミリーマート／ローソン）にページ内リンクで移動でき、店舗詳細ページで「買えた率」やコメントを確認できます。
+        {prefName}
+        {city}のコンビニ店舗を一覧化しています。チェーン別（セブン-イレブン／ファミリーマート／ローソン）にページ内リンクで移動でき、店舗詳細ページで「買えた率」やコメントを確認できます。
       </p>
 
       {/* サマリー */}
@@ -335,7 +383,8 @@ export default async function CityPage({ params }: { params: Params }) {
                   return (
                     <div key={s.id} style={cardStyle}>
                       {href ? (
-                        <Link href={href} style={linkStyle}>
+                        // ✅ ここが超重要：大量の店舗リンクで自動prefetchが暴れないように止める
+                        <Link href={href} prefetch={false} style={linkStyle}>
                           {storeName}
                         </Link>
                       ) : (
@@ -364,7 +413,7 @@ export default async function CityPage({ params }: { params: Params }) {
                 return (
                   <div key={s.id} style={cardStyle}>
                     {href ? (
-                      <Link href={href} style={linkStyle}>
+                      <Link href={href} prefetch={false} style={linkStyle}>
                         {storeName}
                       </Link>
                     ) : (
@@ -388,6 +437,7 @@ export default async function CityPage({ params }: { params: Params }) {
               <Link
                 key={c}
                 href={`/${encodeURIComponent(prefSlug)}/${encodeURIComponent(c)}`}
+                prefetch={false}
                 style={cardLinkStyle}
               >
                 <div style={{ fontWeight: 800, color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2 }}>
@@ -406,7 +456,7 @@ export default async function CityPage({ params }: { params: Params }) {
           <h2 style={{ fontSize: 18, margin: '0 0 10px 0' }}>他の都道府県から探す</h2>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
             {otherPrefs.map((p) => (
-              <Link key={p} href={`/${encodeURIComponent(p)}`} style={pillLinkStyle}>
+              <Link key={p} href={`/${encodeURIComponent(p)}`} prefetch={false} style={pillLinkStyle}>
                 {prefNameBySlug.get(p) ?? p}
               </Link>
             ))}
