@@ -146,9 +146,61 @@ async function fetchCityCountsByPref(prefSlug: string) {
   return cityCount;
 }
 
-// ✅ 他都道府県リンクは stores 全件走査をやめ、prefectures から取得（速度優先）
-async function fetchPrefecturesIndex() {
-  const { data, error } = await supabase.from('prefectures').select('slug, name').order('name', { ascending: true });
+/**
+ * ✅ stores に存在する pref slug だけを抽出（他都道府県リンク用）
+ */
+async function fetchExistingPrefSlugsFromStores() {
+  const PAGE_SIZE = 2000;
+  const CONCURRENCY = 6;
+
+  const { count, error: countError } = await supabase
+    .from('stores')
+    .select('pref', { count: 'exact', head: true })
+    .not('pref', 'is', null);
+
+  if (countError) throw new Error(countError.message);
+
+  const total = Number(count ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return [] as string[];
+
+  const pages = Math.ceil(total / PAGE_SIZE);
+  const prefSet = new Set<string>();
+
+  for (let start = 0; start < pages; start += CONCURRENCY) {
+    const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
+
+    const results = await Promise.all(
+      batch.map(async (page) => {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+
+        const { data, error } = await supabase.from('stores').select('pref').not('pref', 'is', null).range(from, to);
+
+        if (error) throw new Error(error.message);
+        return data ?? [];
+      })
+    );
+
+    for (const rows of results) {
+      for (const row of rows as any[]) {
+        const slug = String(row.pref ?? '').trim().toLowerCase();
+        if (!slug) continue;
+        prefSet.add(slug);
+      }
+    }
+  }
+
+  return Array.from(prefSet);
+}
+
+// ✅ 他都道府県リンク：prefectures は「storesに存在するslug」だけに絞る
+async function fetchPrefecturesIndex(existingPrefSlugs: string[]) {
+  const { data, error } = await supabase
+    .from('prefectures')
+    .select('slug, name')
+    .in('slug', existingPrefSlugs.length > 0 ? existingPrefSlugs : ['__none__'])
+    .order('name', { ascending: true });
+
   if (error) throw new Error(error.message);
 
   const prefNameBySlug = new Map<string, string>();
@@ -246,9 +298,10 @@ export default async function CityPage({ params }: { params: Params }) {
     .slice(0, 20);
 
   // ------------------------------------
-  // 4) 他都道府県リンク（prefecturesから取得）
+  // 4) 他都道府県リンク（storesに存在する都道府県だけ表示）
   // ------------------------------------
-  const { slugs: allPrefSlugs, prefNameBySlug } = await fetchPrefecturesIndex();
+  const existingPrefSlugs = await fetchExistingPrefSlugsFromStores();
+  const { slugs: allPrefSlugs, prefNameBySlug } = await fetchPrefecturesIndex(existingPrefSlugs);
   const otherPrefs = allPrefSlugs.filter((p) => p !== prefSlug).slice(0, 12);
 
   // ------------------------------------
@@ -450,7 +503,7 @@ export default async function CityPage({ params }: { params: Params }) {
         </section>
       )}
 
-      {/* 他都道府県 */}
+      {/* 他都道府県（storesに存在する都道府県だけ） */}
       {otherPrefs.length > 0 && (
         <section style={{ marginTop: 26 }}>
           <h2 style={{ fontSize: 18, margin: '0 0 10px 0' }}>他の都道府県から探す</h2>

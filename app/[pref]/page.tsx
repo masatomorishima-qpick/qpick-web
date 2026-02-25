@@ -81,6 +81,55 @@ async function fetchCityCountsByPref(prefSlug: string) {
   return cityCount;
 }
 
+/**
+ * ✅ stores に存在する pref slug だけを抽出（他都道府県リンク用）
+ * - stores 全件から pref だけ取る（prefectures 全47件よりも多いので、range + 並列で軽く回す）
+ * - JS側で Set 化して unique にする
+ */
+async function fetchExistingPrefSlugsFromStores() {
+  const PAGE_SIZE = 2000;
+  const CONCURRENCY = 6;
+
+  const { count, error: countError } = await supabase
+    .from('stores')
+    .select('pref', { count: 'exact', head: true })
+    .not('pref', 'is', null);
+
+  if (countError) throw new Error(countError.message);
+
+  const total = Number(count ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return [] as string[];
+
+  const pages = Math.ceil(total / PAGE_SIZE);
+  const prefSet = new Set<string>();
+
+  for (let start = 0; start < pages; start += CONCURRENCY) {
+    const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
+
+    const results = await Promise.all(
+      batch.map(async (page) => {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+
+        const { data, error } = await supabase.from('stores').select('pref').not('pref', 'is', null).range(from, to);
+
+        if (error) throw new Error(error.message);
+        return data ?? [];
+      })
+    );
+
+    for (const rows of results) {
+      for (const row of rows as any[]) {
+        const slug = String(row.pref ?? '').trim().toLowerCase();
+        if (!slug) continue;
+        prefSet.add(slug);
+      }
+    }
+  }
+
+  return Array.from(prefSet);
+}
+
 export default async function PrefPage({ params }: { params: Params }) {
   const { pref: prefRaw } = await params;
   const prefSlug = decodeURIComponent(prefRaw).trim().toLowerCase();
@@ -103,18 +152,22 @@ export default async function PrefPage({ params }: { params: Params }) {
   const cities = Array.from(cityCount.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ja'));
   const totalStores = Array.from(cityCount.values()).reduce((sum, n) => sum + n, 0);
 
-  // ---- 他都道府県リンク（ここは /areas があるので、重い集計はやらない）----
-  // ✅ 以前は stores を全件走査していましたが、/areas で都道府県一覧は出せているためここでは省略し、
-  // ✅ 代わりに prefectures から固定で最大12件だけ出します（速度優先）
+  // ---- 他都道府県リンク（storesに登録がある都道府県だけ表示）----
+  // ✅ 1) stores から存在する pref slug を抽出
+  const existingPrefSlugs = await fetchExistingPrefSlugsFromStores();
+
+  // ✅ 2) prefectures から「存在する slug のみ」名前を取る
   const { data: prefNamesRaw, error: prefNamesError } = await supabase
     .from('prefectures')
     .select('slug, name')
+    .in('slug', existingPrefSlugs.length > 0 ? existingPrefSlugs : ['__none__'])
     .order('name', { ascending: true });
 
   if (prefNamesError) throw new Error(prefNamesError.message);
 
   const prefNameBySlug = new Map<string, string>();
   const allPrefSlugs: string[] = [];
+
   for (const r of (prefNamesRaw ?? []) as any[]) {
     const slug = String(r.slug ?? '').trim().toLowerCase();
     const name = String(r.name ?? '').trim();
@@ -122,6 +175,7 @@ export default async function PrefPage({ params }: { params: Params }) {
     allPrefSlugs.push(slug);
     if (name) prefNameBySlug.set(slug, name);
   }
+
   const otherPrefs = allPrefSlugs.filter((p) => p !== prefSlug).slice(0, 12);
 
   // ---- style ----
