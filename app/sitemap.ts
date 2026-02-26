@@ -1,7 +1,6 @@
 import type { MetadataRoute } from 'next';
 import { supabase } from '@/lib/supabaseClient';
 
-export const dynamic = 'force-dynamic';
 export const revalidate = 86400; // 24時間キャッシュ
 
 // URLを絶対URLにする（sitemapは絶対URLが推奨）
