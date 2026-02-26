@@ -138,11 +138,37 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
 
       if (result?.success) {
         setVotedStatus(status);
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+
         const storageValue = JSON.stringify({
           status,
-          timestamp: Date.now(),
+          timestamp: nowMs,
         } satisfies VotedCache);
         localStorage.setItem(votedKey, storageValue);
+
+        // ✅ GA（任意：投票成功ログ）
+        try {
+          sendGAEvent('event', 'vote_submit', {
+            store_id: storeId,
+            product_id: String(productId),
+            status,
+          });
+        } catch {}
+
+        // ✅ Feature1：投票成功→店舗カードのスコアを即更新（親ページに通知）
+        try {
+          window.dispatchEvent(
+            new CustomEvent('qpick_vote_success', {
+              detail: {
+                storeId,
+                productId,
+                status,
+                createdAt: nowIso,
+              },
+            })
+          );
+        } catch {}
       } else {
         setVoteError(result?.message ?? 'しばらく時間を空けてから再度お試しください。');
       }

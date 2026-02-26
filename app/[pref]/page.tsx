@@ -1,4 +1,7 @@
 // app/[pref]/page.tsx
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';

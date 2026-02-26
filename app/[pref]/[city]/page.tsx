@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
+import type { CSSProperties } from 'react';
 
 // ✅ キャッシュ（市区町村→店舗一覧は頻繁に変わらない想定）
 // ※「即時反映が必要」なら、この行を削除して dynamic='force-dynamic' に戻してください
@@ -17,6 +18,11 @@ type StoreListRow = {
   phone: string | null;
   slug: string | null;
 };
+
+type CityOnlyRow = { city: string | null };
+type PrefOnlyRow = { pref: string | null };
+type PrefectureRow = { slug: string | null; name: string | null };
+type PrefectureNameRow = { name: string | null };
 
 function chainKey(v: unknown): string {
   const s = String(v ?? '').trim().toLowerCase();
@@ -71,7 +77,7 @@ async function fetchStoresByPrefCity(prefSlug: string, city: string) {
     const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
 
     const results = await Promise.all(
-      batch.map(async (page) => {
+      batch.map(async (page): Promise<StoreListRow[]> => {
         const from = page * PAGE_SIZE;
         const to = from + PAGE_SIZE - 1;
 
@@ -118,7 +124,7 @@ async function fetchCityCountsByPref(prefSlug: string) {
     const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
 
     const results = await Promise.all(
-      batch.map(async (page) => {
+      batch.map(async (page): Promise<CityOnlyRow[]> => {
         const from = page * PAGE_SIZE;
         const to = from + PAGE_SIZE - 1;
 
@@ -130,12 +136,12 @@ async function fetchCityCountsByPref(prefSlug: string) {
           .range(from, to);
 
         if (error) throw new Error(error.message);
-        return data ?? [];
+        return (data ?? []) as unknown as CityOnlyRow[];
       })
     );
 
     for (const rows of results) {
-      for (const row of rows as any[]) {
+      for (const row of rows) {
         const c = safeText(row.city);
         if (!c) continue;
         cityCount.set(c, (cityCount.get(c) ?? 0) + 1);
@@ -170,19 +176,19 @@ async function fetchExistingPrefSlugsFromStores() {
     const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
 
     const results = await Promise.all(
-      batch.map(async (page) => {
+      batch.map(async (page): Promise<PrefOnlyRow[]> => {
         const from = page * PAGE_SIZE;
         const to = from + PAGE_SIZE - 1;
 
         const { data, error } = await supabase.from('stores').select('pref').not('pref', 'is', null).range(from, to);
 
         if (error) throw new Error(error.message);
-        return data ?? [];
+        return (data ?? []) as unknown as PrefOnlyRow[];
       })
     );
 
     for (const rows of results) {
-      for (const row of rows as any[]) {
+      for (const row of rows) {
         const slug = String(row.pref ?? '').trim().toLowerCase();
         if (!slug) continue;
         prefSet.add(slug);
@@ -205,7 +211,7 @@ async function fetchPrefecturesIndex(existingPrefSlugs: string[]) {
 
   const prefNameBySlug = new Map<string, string>();
   const slugs: string[] = [];
-  for (const r of (data ?? []) as any[]) {
+  for (const r of (data ?? []) as unknown as PrefectureRow[]) {
     const slug = String(r.slug ?? '').trim().toLowerCase();
     const name = String(r.name ?? '').trim();
     if (!slug) continue;
@@ -231,7 +237,7 @@ export async function generateMetadata({ params }: { params: Params }) {
 
   if (prefErr) throw new Error(prefErr.message);
 
-  const prefName = (prefRow as any)?.name ?? prefSlug;
+  const prefName = (prefRow as unknown as PrefectureNameRow | null)?.name ?? prefSlug;
 
   return {
     title: `${prefName}${city}のコンビニ店舗一覧｜コンビニの在庫共有サービスQpick`,
@@ -255,7 +261,7 @@ export default async function CityPage({ params }: { params: Params }) {
 
   if (prefErr) throw new Error(prefErr.message);
 
-  const prefName = (prefRow as any)?.name ?? prefSlug;
+  const prefName = (prefRow as unknown as PrefectureNameRow | null)?.name ?? prefSlug;
 
   // ------------------------------------
   // 1) この市区町村の店舗一覧（バッチ並列）
@@ -307,23 +313,23 @@ export default async function CityPage({ params }: { params: Params }) {
   // ------------------------------------
   // UIスタイル（リンクがリンクに見えるように）
   // ------------------------------------
-  const breadcrumbLink: React.CSSProperties = { color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2 };
+  const breadcrumbLink: CSSProperties = { color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2 };
 
-  const linkStyle: React.CSSProperties = {
+  const linkStyle: CSSProperties = {
     color: '#2563eb',
     textDecoration: 'underline',
     textUnderlineOffset: 2,
     fontWeight: 800,
   };
 
-  const cardStyle: React.CSSProperties = {
+  const cardStyle: CSSProperties = {
     padding: '12px 12px',
     borderRadius: 14,
     border: '1px solid #e2e8f0',
     background: '#fff',
   };
 
-  const cardLinkStyle: React.CSSProperties = {
+  const cardLinkStyle: CSSProperties = {
     display: 'block',
     padding: '12px 12px',
     borderRadius: 14,
@@ -334,7 +340,7 @@ export default async function CityPage({ params }: { params: Params }) {
     cursor: 'pointer',
   };
 
-  const pillLinkStyle: React.CSSProperties = {
+  const pillLinkStyle: CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
     padding: '10px 12px',
@@ -436,7 +442,6 @@ export default async function CityPage({ params }: { params: Params }) {
                   return (
                     <div key={s.id} style={cardStyle}>
                       {href ? (
-                        // ✅ ここが超重要：大量の店舗リンクで自動prefetchが暴れないように止める
                         <Link href={href} prefetch={false} style={linkStyle}>
                           {storeName}
                         </Link>

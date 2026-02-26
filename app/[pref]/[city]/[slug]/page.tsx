@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
+import type { CSSProperties } from 'react';
 
 // ✅ 店舗詳細は投稿・集計が動くので、一覧より短めにキャッシュ（例：5分）
 // ※リアルタイム性を上げたいなら 60〜180、重さ優先なら 600 などに調整してください
@@ -26,6 +27,41 @@ type StoreRow = {
   note: string | null;
 };
 
+type PrefectureNameRow = { name: string | null };
+type StoreNameRow = { name: string | null };
+
+type OverallStatsRow = {
+  found: number | null;
+  not_found: number | null;
+  total: number | null;
+  last_report_at: string | null;
+};
+
+type StoreProductStatsRow = {
+  product_id: number | null;
+  product_name: string | null;
+  found: number | null;
+  not_found: number | null;
+  total: number | null;
+  found_rate_pct: number | null;
+};
+
+type FeedbackRow = {
+  created_at: string;
+  comment: string | null;
+  product_id: number | null;
+};
+
+type TopKeywordRow = {
+  keyword: string | null;
+  searches: number | null;
+};
+
+type ProductRow = {
+  id: number | null;
+  name: string | null;
+};
+
 type NearbyRpcRow = {
   id: string;
   chain: string;
@@ -34,6 +70,23 @@ type NearbyRpcRow = {
   phone: string | null;
   latitude: number | null;
   longitude: number | null;
+  distance_m: number | null;
+};
+
+type NearStoreDbRow = {
+  id: string;
+  name: string | null;
+  slug: string | null;
+  address: string | null;
+  chain: string | null;
+};
+
+type NearStoreItem = {
+  id: string;
+  name: string;
+  slug: string;
+  address: string | null;
+  chain: string | null;
   distance_m: number | null;
 };
 
@@ -85,8 +138,12 @@ export async function generateMetadata({ params }: { params: Params }) {
     supabase.from('stores').select('name').eq('slug', slug).maybeSingle(),
   ]);
 
-  const prefName = (prefRes.data as any)?.name ?? prefSlug;
-  const storeName = (storeRes.data as any)?.name ? String((storeRes.data as any).name) : '店舗詳細';
+  const prefName = ((prefRes.data ?? null) as unknown as PrefectureNameRow | null)?.name ?? prefSlug;
+
+  const storeName =
+    ((storeRes.data ?? null) as unknown as StoreNameRow | null)?.name != null
+      ? String(((storeRes.data ?? null) as unknown as StoreNameRow).name)
+      : '店舗詳細';
 
   return {
     title: `${prefName}${city} ${storeName}｜コンビニの在庫共有サービスQpick`,
@@ -115,15 +172,15 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
       .single(),
   ]);
 
-  const prefName = (prefRes.data as any)?.name ?? prefParam;
+  const prefName = ((prefRes.data ?? null) as unknown as PrefectureNameRow | null)?.name ?? prefParam;
 
-  const storeRaw = storeRes.data as any;
   const storeError = storeRes.error;
+  const storeRaw = (storeRes.data ?? null) as unknown as StoreRow | null;
 
-  // ★ここ：return notFound() ではなく notFound() を呼ぶ
+  // ★ここ：return notFound() ではなく notFound() を呼ぶ（throw）
   if (storeError || !storeRaw) notFound();
 
-  const store = storeRaw as unknown as StoreRow;
+  const store = storeRaw;
 
   const canonicalPref = safeText(store.pref) ? safeText(store.pref).toLowerCase() : prefParam;
   const canonicalCity = safeText(store.city) ? safeText(store.city) : cityParam;
@@ -164,43 +221,47 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
     }),
   ]);
 
-  const overallArr = overallRes.data;
-  const overall = Array.isArray(overallArr) && overallArr[0] ? (overallArr[0] as any) : null;
+  const overallArr = overallRes.data as unknown;
+  const overall =
+    Array.isArray(overallArr) && overallArr[0]
+      ? ((overallArr[0] as unknown) as OverallStatsRow)
+      : null;
+
   const found = Number(overall?.found ?? 0);
   const notFoundCount = Number(overall?.not_found ?? 0);
   const total = Number(overall?.total ?? 0);
   const lastReportAt = overall?.last_report_at ? String(overall.last_report_at) : null;
   const foundPct = fmtPct(found, total);
 
-  const prodStatsRaw = prodStatsRes.data;
-  const prodStats = Array.isArray(prodStatsRaw) ? (prodStatsRaw as any[]) : [];
+  const prodStatsRaw = prodStatsRes.data as unknown;
+  const prodStats: StoreProductStatsRow[] = Array.isArray(prodStatsRaw)
+    ? (prodStatsRaw as unknown as StoreProductStatsRow[])
+    : [];
 
-  const fbRaw = fbRes.data;
-  const feedback = Array.isArray(fbRaw) ? (fbRaw as any[]) : [];
+  const fbRaw = fbRes.data as unknown;
+  const feedback: FeedbackRow[] = Array.isArray(fbRaw) ? (fbRaw as unknown as FeedbackRow[]) : [];
 
-  const topKwRaw = topKwRes.data;
-  const topKeywords = Array.isArray(topKwRaw) ? (topKwRaw as any[]) : [];
+  const topKwRaw = topKwRes.data as unknown;
+  const topKeywords: TopKeywordRow[] = Array.isArray(topKwRaw) ? (topKwRaw as unknown as TopKeywordRow[]) : [];
 
   // コメントに紐づく商品名
-  const productIds = Array.from(new Set(feedback.map((r) => Number(r.product_id)).filter((n) => Number.isFinite(n))));
+  const productIds = Array.from(
+    new Set(feedback.map((r) => Number(r.product_id)).filter((n) => Number.isFinite(n)))
+  );
   const productNameById = new Map<number, string>();
 
   if (productIds.length > 0) {
     const { data: productsRaw } = await supabase.from('products').select('id, name').in('id', productIds);
-    for (const p of (productsRaw ?? []) as any[]) {
-      productNameById.set(Number(p.id), String(p.name));
+    const products = (productsRaw ?? []) as unknown as ProductRow[];
+    for (const p of products) {
+      const id = Number(p.id);
+      if (!Number.isFinite(id)) continue;
+      productNameById.set(id, String(p.name ?? ''));
     }
   }
 
   // 近隣店舗（距離順）
-  let nearStores: Array<{
-    id: string;
-    name: string;
-    slug: string;
-    address: string | null;
-    chain: string | null;
-    distance_m: number | null;
-  }> = [];
+  let nearStores: NearStoreItem[] = [];
 
   const lat = Number(store.latitude);
   const lng = Number(store.longitude);
@@ -228,12 +289,13 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
 
     if (ids.length > 0) {
       const { data: storesRaw } = await supabase.from('stores').select('id, name, slug, address, chain').in('id', ids);
+      const storeRows = (storesRaw ?? []) as unknown as NearStoreDbRow[];
 
-      const byId = new Map<string, any>();
-      for (const s of (storesRaw ?? []) as any[]) byId.set(String(s.id), s);
+      const byId = new Map<string, NearStoreDbRow>();
+      for (const s of storeRows) byId.set(String(s.id), s);
 
       nearStores = ids
-        .map((id) => {
+        .map((id): NearStoreItem | null => {
           const s = byId.get(id);
           if (!s || !s.slug) return null;
           return {
@@ -245,7 +307,7 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
             distance_m: distById.get(id) ?? null,
           };
         })
-        .filter(Boolean) as any[];
+        .filter((v): v is NearStoreItem => v !== null);
     }
   } else {
     const { data: nearFallback } = await supabase
@@ -258,26 +320,32 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
       .order('name', { ascending: true })
       .limit(12);
 
-    nearStores =
-      (nearFallback ?? []).map((s: any) => ({
-        id: String(s.id),
-        name: String(s.name ?? '店舗名'),
-        slug: String(s.slug ?? ''),
-        address: s.address ?? null,
-        chain: s.chain ?? null,
-        distance_m: null,
-      })) ?? [];
-    nearStores = nearStores.filter((s) => !!s.slug);
+    const rows = (nearFallback ?? []) as unknown as NearStoreDbRow[];
+
+    nearStores = rows
+      .map((s): NearStoreItem | null => {
+        const slug = s.slug ? String(s.slug) : '';
+        if (!slug) return null;
+        return {
+          id: String(s.id),
+          name: String(s.name ?? '店舗名'),
+          slug,
+          address: s.address ?? null,
+          chain: s.chain ?? null,
+          distance_m: null,
+        };
+      })
+      .filter((v): v is NearStoreItem => v !== null);
   }
 
-  const breadcrumbLink: React.CSSProperties = { color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2 };
-  const linkStyle: React.CSSProperties = {
+  const breadcrumbLink: CSSProperties = { color: '#2563eb', textDecoration: 'underline', textUnderlineOffset: 2 };
+  const linkStyle: CSSProperties = {
     color: '#2563eb',
     textDecoration: 'underline',
     textUnderlineOffset: 2,
     fontWeight: 800,
   };
-  const card: React.CSSProperties = {
+  const card: CSSProperties = {
     padding: '12px 12px',
     borderRadius: 14,
     border: '1px solid #e2e8f0',
@@ -369,11 +437,11 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
         ) : (
           <ul style={{ margin: 0, paddingLeft: 18 }}>
             {prodStats.map((r, i) => (
-              <li key={`${r.product_id}-${i}`} style={{ margin: '8px 0', color: '#334155' }}>
-                <b>{r.product_name}</b>
+              <li key={`${r.product_id ?? 'p'}-${i}`} style={{ margin: '8px 0', color: '#334155' }}>
+                <b>{String(r.product_name ?? '')}</b>
                 <div style={{ color: '#64748b', fontSize: 13, marginTop: 2 }}>
-                  買えた {r.found} / 売切れ {r.not_found} / 合計 {r.total}
-                  {r.found_rate_pct != null ? ` / 買えた率 ${r.found_rate_pct}%` : ''}
+                  買えた {Number(r.found ?? 0)} / 売切れ {Number(r.not_found ?? 0)} / 合計 {Number(r.total ?? 0)}
+                  {r.found_rate_pct != null ? ` / 買えた率 ${Number(r.found_rate_pct)}%` : ''}
                 </div>
               </li>
             ))}
@@ -389,7 +457,7 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
           <ul style={{ margin: 0, paddingLeft: 18 }}>
             {feedback.map((r, i) => {
               const pid = Number(r.product_id);
-              const pn = productNameById.get(pid);
+              const pn = Number.isFinite(pid) ? productNameById.get(pid) : undefined;
               return (
                 <li key={`${r.created_at}-${i}`} style={{ margin: '10px 0' }}>
                   <div style={{ color: '#334155' }}>
@@ -414,8 +482,9 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
         ) : (
           <ol style={{ margin: 0, paddingLeft: 18 }}>
             {topKeywords.map((k, i) => (
-              <li key={`${k.keyword}-${i}`} style={{ margin: '6px 0', color: '#334155' }}>
-                {k.keyword} <span style={{ color: '#64748b', fontSize: 13 }}>（{k.searches}）</span>
+              <li key={`${k.keyword ?? 'kw'}-${i}`} style={{ margin: '6px 0', color: '#334155' }}>
+                {String(k.keyword ?? '')}{' '}
+                <span style={{ color: '#64748b', fontSize: 13 }}>（{Number(k.searches ?? 0)}）</span>
               </li>
             ))}
           </ol>

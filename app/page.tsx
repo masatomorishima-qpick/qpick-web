@@ -1,9 +1,10 @@
 'use client';
 
+import Link from 'next/link';
+
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import StoreFeedback from '@/components/StoreFeedback';
 import { supabase } from '@/lib/supabaseClient';
-import Image from 'next/image';
 import { sendGAEvent } from '@next/third-parties/google';
 
 type Candidate = {
@@ -21,8 +22,24 @@ type StoreCommunity = {
   label?: string | null;
 };
 
+type StoreScore = {
+  ttlHours?: number | null;
+
+  foundCount?: number | null;
+  notFoundCount?: number | null;
+  total?: number | null;
+
+  lastFoundAt?: string | null;
+  lastNotFoundAt?: string | null;
+  lastAnyAt?: string | null;
+  lastStatus?: 'found' | 'not_found' | null;
+
+  label?: '高' | '中' | '低' | '—' | string | null;
+  rank?: number | null;
+};
+
 type Store = {
-  id: string; // uuid（APIから文字列で来る想定）
+  id: string;
   chain?: string | null;
 
   name?: string | null;
@@ -40,20 +57,18 @@ type Store = {
   latitude?: number | null;
   longitude?: number | null;
 
-  // 互換用（念のため）
   lat?: number | null;
   lng?: number | null;
 
   distance_m?: number | null;
 
   community?: StoreCommunity | null;
+  score?: StoreScore | null;
 };
 
-// ★オーナー相談フォーム（トップ導線用）
 const OWNER_FORM_URL =
   'https://docs.google.com/forms/d/e/1FAIpQLSesiwtfNBHr1XByAE9_ObRyPJJlnqHvIg8Key1iuKDAg-A86A/viewform?usp=dialog';
 
-// 追加要望ログ（product_requests に INSERTするだけ）
 async function logProductRequest(keyword: string) {
   const trimmed = keyword.trim();
   if (!trimmed) return;
@@ -65,7 +80,6 @@ async function logProductRequest(keyword: string) {
   if (error) console.warn('product_requests insert failed:', error.message);
 }
 
-// 位置情報を Promise 化
 function getCurrentPositionAsync(options?: PositionOptions) {
   return new Promise<GeolocationPosition>((resolve, reject) => {
     if (!('geolocation' in navigator)) {
@@ -98,8 +112,49 @@ function pickFirstNonEmptyString(values: Array<unknown>): string | null {
   return null;
 }
 
+function formatTimeAgo(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '—';
+
+  const diffMs = Date.now() - t;
+  if (!Number.isFinite(diffMs)) return '—';
+  if (diffMs <= 0) return 'たった今';
+
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return `${sec}秒前`;
+
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}分前`;
+
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}時間前`;
+
+  const day = Math.floor(hr / 24);
+  return `${day}日前`;
+}
+
+function calcScoreLabelRank(foundCount: number, notFoundCount: number, lastStatus: 'found' | 'not_found' | null) {
+  const total = foundCount + notFoundCount;
+  if (total === 0) return { label: '—' as const, rank: 0 as const };
+  if (notFoundCount >= 1 && foundCount === 0) return { label: '低' as const, rank: 1 as const };
+  if (foundCount >= 1 && lastStatus === 'found' && notFoundCount === 0) return { label: '高' as const, rank: 3 as const };
+  return { label: '中' as const, rank: 2 as const };
+}
+
+function calcCommunityLabel(found: number, notFound: number) {
+  const COMMUNITY_MIN_SAMPLES = 5;
+  const total = found + notFound;
+  if (total === 0) return null;
+  if (total < COMMUNITY_MIN_SAMPLES) return 'データ少';
+  const foundRate = total > 0 ? found / total : null;
+  if (foundRate !== null && foundRate >= 0.7) return '買えた多め';
+  if (foundRate !== null && foundRate <= 0.3) return '売切れ多め';
+  return null;
+}
+
 export default function HomePage() {
-  const RADIUS_KM = 5.0; // route.ts の radius_m=5000 と合わせる（表示用）
+  const RADIUS_KM = 5.0;
   const MIN_SUGGEST_CHARS = 2;
   const SUGGEST_DEBOUNCE_MS = 250;
 
@@ -109,19 +164,20 @@ export default function HomePage() {
   const [stores, setStores] = useState<Store[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // 店舗検索を実行したか（初期は店舗一覧を出さないため）
   const [hasSearched, setHasSearched] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const [productId, setProductId] = useState<number | null>(null);
   const [highRiskStoreIds, setHighRiskStoreIds] = useState<string[]>([]);
 
-  // サジェスト
+  type SortMode = 'distance' | 'score';
+  const [sortMode, setSortMode] = useState<SortMode>('distance');
+  const [userChangedSort, setUserChangedSort] = useState(false);
+
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
 
-  // 追加要望（同一キーワードの連打防止：localStorage）
   const [requestSent, setRequestSent] = useState(false);
 
   const trimmedKeyword = useMemo(() => keyword.trim(), [keyword]);
@@ -151,13 +207,7 @@ export default function HomePage() {
     return `${(n / 1000).toFixed(1)}km`;
   };
 
-  // Google Maps URLs API：店名 + 住所で検索（店舗詳細が開きやすい）
-  const buildMapUrl = (params: {
-    latitude?: unknown;
-    longitude?: unknown;
-    address?: unknown;
-    name?: unknown;
-  }) => {
+  const buildMapUrl = (params: { latitude?: unknown; longitude?: unknown; address?: unknown; name?: unknown }) => {
     const lat = Number(params.latitude);
     const lng = Number(params.longitude);
     const name = typeof params.name === 'string' ? params.name.trim() : '';
@@ -167,15 +217,10 @@ export default function HomePage() {
       const query = `${name} ${addr}`;
       return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
     }
-
-    if (name) {
-      return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}`;
-    }
-
+    if (name) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}`;
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
       return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
     }
-
     return null;
   };
 
@@ -184,13 +229,89 @@ export default function HomePage() {
     return digits || null;
   };
 
-  // 住所から郵便番号（〒123-4567）を除去（表示＆地図リンク用）
   const stripPostalCode = (address: string) => {
     return String(address ?? '')
       .replace(/〒\s*\d{3}-\d{4}\s*/g, '')
       .replace(/^\s*\d{3}-\d{4}\s*/g, '')
       .trim();
   };
+
+
+type VoteSuccessDetail = {
+  storeId: string;
+  productId: number;
+  status: 'found' | 'not_found';
+  createdAt: string;
+};
+
+  // -----------------------------
+  // ✅ 投票成功イベントを受けて、店舗カードを即時更新
+  // -----------------------------
+  useEffect(() => {
+    const handler = (ev: Event) => {
+const detail = (ev as CustomEvent<VoteSuccessDetail>).detail;
+if (!detail) return;
+
+      if (!detail) return;
+      if (!productId || Number(detail.productId) !== Number(productId)) return;
+
+      setStores((prev) => {
+        return prev.map((s) => {
+          if (String(s.id) !== String(detail.storeId)) return s;
+
+          const createdAt = detail.createdAt;
+
+          // --- score 更新（TTL 6h）
+          const ttlHours = Number(s.score?.ttlHours ?? 6);
+          const foundCount = Number(s.score?.foundCount ?? 0) + (detail.status === 'found' ? 1 : 0);
+          const notFoundCount = Number(s.score?.notFoundCount ?? 0) + (detail.status === 'not_found' ? 1 : 0);
+          const lastStatus = detail.status;
+          const { label, rank } = calcScoreLabelRank(foundCount, notFoundCount, lastStatus);
+
+          const nextScore: StoreScore = {
+            ttlHours,
+            foundCount,
+            notFoundCount,
+            total: foundCount + notFoundCount,
+            lastFoundAt: detail.status === 'found' ? createdAt : (s.score?.lastFoundAt ?? null),
+            lastNotFoundAt: detail.status === 'not_found' ? createdAt : (s.score?.lastNotFoundAt ?? null),
+            lastAnyAt: createdAt,
+            lastStatus,
+            label,
+            rank,
+          };
+
+          // --- community 更新（30日。ラベル再計算は軽くやる）
+          const c = s.community ?? null;
+          const cFound = Number(c?.found ?? 0) + (detail.status === 'found' ? 1 : 0);
+          const cNotFound = Number(c?.notFound ?? 0) + (detail.status === 'not_found' ? 1 : 0);
+          const cTotal = cFound + cNotFound;
+          const nextCommunity: StoreCommunity | null = c
+            ? {
+                ...c,
+                found: cFound,
+                notFound: cNotFound,
+                total: cTotal,
+                lastReportAt: createdAt,
+                label: calcCommunityLabel(cFound, cNotFound),
+              }
+            : {
+                windowDays: 30,
+                found: cFound,
+                notFound: cNotFound,
+                total: cTotal,
+                lastReportAt: createdAt,
+                label: calcCommunityLabel(cFound, cNotFound),
+              };
+
+          return { ...s, score: nextScore, community: nextCommunity };
+        });
+      });
+    };
+
+    window.addEventListener('qpick_vote_success', handler as EventListener);
+    return () => window.removeEventListener('qpick_vote_success', handler as EventListener);
+  }, [productId]);
 
   // -----------------------------
   // 「みんなの結果（店舗別）」：最小表示
@@ -234,13 +355,8 @@ export default function HomePage() {
     return (
       <div style={{ marginTop: '0.5rem' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <span style={pill({ bg: '#ecfdf5', bd: '#bbf7d0', fg: '#166534' })}>
-            ✓ 買えた {Number.isFinite(found) ? found : 0}
-          </span>
-          <span style={pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })}>
-            × 売切れ {Number.isFinite(notFound) ? notFound : 0}
-          </span>
-
+          <span style={pill({ bg: '#ecfdf5', bd: '#bbf7d0', fg: '#166534' })}>✓ 買えた {found}</span>
+          <span style={pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })}>× 売切れ {notFound}</span>
           <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>直近{windowDays}日</span>
         </div>
 
@@ -255,22 +371,48 @@ export default function HomePage() {
             }}
             aria-label={`buy-rate-${pct}`}
           >
-            <div
-              style={{
-                width: `${pct}%`,
-                height: '100%',
-                backgroundColor: '#2563eb',
-              }}
-            />
+            <div style={{ width: `${pct}%`, height: '100%', backgroundColor: '#2563eb' }} />
           </div>
         )}
       </div>
     );
   };
 
-  // -----------------------------
-  // 入力中サジェスト（商品確定前のみ）
-  // -----------------------------
+  const renderScoreCompact = (store: Store) => {
+    const s = store?.score;
+    if (!s) return null;
+
+    const label = (s.label ?? '—') as string;
+    const ttlHours = Number(s.ttlHours ?? 6);
+    const lastAnyAt = typeof s.lastAnyAt === 'string' ? s.lastAnyAt : null;
+
+    const isNone = label === '—';
+    const pillStyle =
+      label === '高'
+        ? pill({ bg: '#ecfdf5', bd: '#bbf7d0', fg: '#166534' })
+        : label === '中'
+        ? pill({ bg: '#eff6ff', bd: '#bfdbfe', fg: '#1d4ed8' })
+        : label === '低'
+        ? pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })
+        : pill({ bg: '#f3f4f6', bd: '#e5e7eb', fg: '#374151' });
+
+    return (
+      <div style={{ marginTop: '0.5rem' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          <span style={pillStyle}>買える確率 {label}</span>
+          <span style={{ fontSize: '0.8rem', color: '#475569' }}>最終報告 {formatTimeAgo(lastAnyAt)}</span>
+          <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>集計 直近{ttlHours}時間</span>
+        </div>
+        {isNone && (
+          <div style={{ marginTop: 6, fontSize: '0.85rem', color: '#64748b' }}>
+            情報がありません。買えた・買えなかったで共有できます。
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // サジェスト
   useEffect(() => {
     if (selectedCandidate) return;
 
@@ -301,9 +443,7 @@ export default function HomePage() {
         const json: unknown = await res.json().catch(() => ({}));
 
         const maybeError =
-          typeof json === 'object' && json !== null && 'error' in json
-            ? (json as { error?: unknown }).error
-            : undefined;
+          typeof json === 'object' && json !== null && 'error' in json ? (json as { error?: unknown }).error : undefined;
 
         const maybeCandidates =
           typeof json === 'object' && json !== null && 'candidates' in json
@@ -325,7 +465,6 @@ export default function HomePage() {
           setNotice(null);
         }
       } catch (e: unknown) {
-        // AbortError は無視
         if (typeof e === 'object' && e !== null && 'name' in e) {
           const name = (e as { name?: unknown }).name;
           if (name === 'AbortError') return;
@@ -345,9 +484,6 @@ export default function HomePage() {
     };
   }, [trimmedKeyword, selectedCandidate]);
 
-  // -----------------------------
-  // 商品確定（候補クリック）
-  // -----------------------------
   const confirmCandidate = (c: Candidate) => {
     setSelectedCandidate(c);
     setCandidates([]);
@@ -360,6 +496,9 @@ export default function HomePage() {
     setHasSearched(false);
     setProductId(null);
     setError(null);
+
+    setSortMode('distance');
+    setUserChangedSort(false);
   };
 
   const clearSelection = () => {
@@ -370,12 +509,31 @@ export default function HomePage() {
     setHasSearched(false);
     setNotice(null);
     setError(null);
+
+    setSortMode('distance');
+    setUserChangedSort(false);
   };
 
-  // -----------------------------
-  // 店舗検索（検索ボタン）
-  // ※ search_logs は API 側で一元管理する（ここではログINSERTしない）
-  // -----------------------------
+  const sortedStores = useMemo(() => {
+    if (sortMode === 'distance') return stores;
+
+    const copy = [...stores];
+    copy.sort((a, b) => {
+      const ar = Number(a.score?.rank ?? 0);
+      const br = Number(b.score?.rank ?? 0);
+      if (br !== ar) return br - ar;
+
+      const al = typeof a.score?.lastAnyAt === 'string' ? a.score?.lastAnyAt : '';
+      const bl = typeof b.score?.lastAnyAt === 'string' ? b.score?.lastAnyAt : '';
+      if (bl !== al) return bl > al ? 1 : -1;
+
+      const ad = Number(a.distance_m ?? Number.POSITIVE_INFINITY);
+      const bd = Number(b.distance_m ?? Number.POSITIVE_INFINITY);
+      return ad - bd;
+    });
+    return copy;
+  }, [stores, sortMode]);
+
   const runSearch = async (c: Candidate) => {
     setLoading(true);
     setError(null);
@@ -384,6 +542,9 @@ export default function HomePage() {
     setHighRiskStoreIds([]);
     setHasSearched(false);
 
+    setUserChangedSort(false);
+    setSortMode('distance');
+
     try {
       const pos = await getCurrentPositionAsync({
         enableHighAccuracy: false,
@@ -391,7 +552,6 @@ export default function HomePage() {
         maximumAge: 0,
       });
 
-      // 検索には「正確な現在地」を使う（結果精度のため）
       const lat = pos.coords.latitude;
       const lng = pos.coords.longitude;
 
@@ -405,9 +565,7 @@ export default function HomePage() {
       const json: unknown = await res.json().catch(() => ({}));
 
       const maybeError =
-        typeof json === 'object' && json !== null && 'error' in json
-          ? (json as { error?: unknown }).error
-          : undefined;
+        typeof json === 'object' && json !== null && 'error' in json ? (json as { error?: unknown }).error : undefined;
 
       if (!res.ok) {
         const msg = typeof maybeError === 'string' ? maybeError : '検索 API の呼び出しに失敗しました';
@@ -415,17 +573,12 @@ export default function HomePage() {
       }
 
       const storesFromApi =
-        typeof json === 'object' &&
-        json !== null &&
-        'stores' in json &&
-        Array.isArray((json as { stores?: unknown }).stores)
+        typeof json === 'object' && json !== null && 'stores' in json && Array.isArray((json as { stores?: unknown }).stores)
           ? ((json as { stores: unknown[] }).stores as Store[])
           : [];
 
       const apiProductId =
-        typeof json === 'object' && json !== null && 'productId' in json
-          ? Number((json as { productId?: unknown }).productId)
-          : NaN;
+        typeof json === 'object' && json !== null && 'productId' in json ? Number((json as { productId?: unknown }).productId) : NaN;
 
       const apiHighRisk =
         typeof json === 'object' &&
@@ -434,6 +587,40 @@ export default function HomePage() {
         Array.isArray((json as { highRiskStoreIds?: unknown }).highRiskStoreIds)
           ? ((json as { highRiskStoreIds: unknown[] }).highRiskStoreIds as string[])
           : [];
+
+      let nextSort: SortMode = 'distance';
+      if (!userChangedSort) {
+        const hasScored = storesFromApi.some((s) => Number(s.score?.total ?? 0) > 0);
+        const hasMidOrHigh = storesFromApi.some((s) => Number(s.score?.rank ?? 0) >= 2);
+        if (hasScored && hasMidOrHigh) nextSort = 'score';
+      }
+      setSortMode(nextSort);
+
+      try {
+        const ttlHours = Number(storesFromApi[0]?.score?.ttlHours ?? 6);
+        const counts = storesFromApi.reduce(
+          (acc, s) => {
+            const label = String(s.score?.label ?? '—');
+            if (label === '高') acc.high += 1;
+            else if (label === '中') acc.mid += 1;
+            else if (label === '低') acc.low += 1;
+            else acc.none += 1;
+            return acc;
+          },
+          { high: 0, mid: 0, low: 0, none: 0 }
+        );
+
+        sendGAEvent('event', 'score_rendered', {
+          product_id: String(c.id),
+          ttl_hours: String(ttlHours),
+          stores_total: String(storesFromApi.length),
+          scored_store_count: String(storesFromApi.length - counts.none),
+          score_high_count: String(counts.high),
+          score_mid_count: String(counts.mid),
+          score_low_count: String(counts.low),
+          sort_mode: nextSort,
+        });
+      } catch {}
 
       setStores(storesFromApi);
       setProductId(Number.isFinite(apiProductId) ? apiProductId : c.id);
@@ -446,12 +633,9 @@ export default function HomePage() {
         );
       }
     } catch (err: unknown) {
-      // 位置情報系エラー（Geolocation）
       if (isGeoError(err)) {
         if (err.code === 1) {
-          setError(
-            '検索には位置情報の許可が必要です。ブラウザの設定で許可をしてから、再度検索ボタンを押してください。'
-          );
+          setError('検索には位置情報の許可が必要です。ブラウザの設定で許可をしてから、再度検索ボタンを押してください。');
         } else if (err.code === 2) {
           setError('位置情報が取得できませんでした（端末/ブラウザ設定をご確認ください）。');
         } else if (err.code === 3) {
@@ -477,7 +661,6 @@ export default function HomePage() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
-
     if (!selectedCandidate) return;
     await runSearch(selectedCandidate);
   };
@@ -519,14 +702,7 @@ export default function HomePage() {
         backgroundColor: '#f8fafc',
       }}
     >
-      <div
-        style={{
-          width: '100%',
-          maxWidth: 600,
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
+      <div style={{ width: '100%', maxWidth: 600, display: 'flex', flexDirection: 'column' }}>
         <header
           style={{
             display: 'flex',
@@ -536,8 +712,6 @@ export default function HomePage() {
             textAlign: 'center',
           }}
         >
-          
-
           <div style={{ marginBottom: '1rem' }}>
             <span
               style={{
@@ -555,23 +729,14 @@ export default function HomePage() {
             </span>
           </div>
 
-          <h1
-            style={{
-              fontSize: '1.15rem',
-              fontWeight: 700,
-              color: '#111827',
-              margin: 0,
-              lineHeight: 1.4,
-            }}
-          >
+          <h1 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#111827', margin: 0, lineHeight: 1.4 }}>
             その商品、最寄りのコンビニにあるかも？
           </h1>
 
-          <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>
-            みんなの目撃情報で無駄足回避
-          </p>
+          <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>みんなの目撃情報で無駄足回避</p>
         </header>
 
+        {/* 1) 検索窓 */}
         <div
           style={{
             backgroundColor: '#ffffff',
@@ -597,6 +762,9 @@ export default function HomePage() {
                   setProductId(null);
                   setError(null);
                   setNotice(null);
+
+                  setSortMode('distance');
+                  setUserChangedSort(false);
                 }}
                 placeholder="商品名の一部を入力（例：ちいかわ）"
                 style={{
@@ -622,9 +790,7 @@ export default function HomePage() {
             )}
 
             {suggestLoading && (
-              <p style={{ color: '#9ca3af', fontSize: '0.9rem', margin: 0, paddingLeft: '0.8rem' }}>
-                候補を検索中…
-              </p>
+              <p style={{ color: '#9ca3af', fontSize: '0.9rem', margin: 0, paddingLeft: '0.8rem' }}>候補を検索中…</p>
             )}
 
             {!selectedCandidate && candidates.length > 0 && (
@@ -740,143 +906,66 @@ export default function HomePage() {
           </form>
         </div>
 
-{/* エリア別店舗情報（店舗向け導線の上） */}
-<div style={{ marginTop: '1.6rem', textAlign: 'center' }}>
-  <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>
-    エリア別の店舗情報
-  </div>
-
-  <a
-    href="/areas"
-    onClick={() =>
-      sendGAEvent('event', 'area_pages_click', {
-        placement: 'above_owner_section',
-      })
-    }
-    style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 8,
-      padding: '0.75rem 1.1rem',
-      borderRadius: 999,
-      border: '1px solid #bfdbfe',
-      backgroundColor: '#eff6ff',
-      color: '#1d4ed8',
-      textDecoration: 'underline',
-      textUnderlineOffset: 2,
-      fontSize: '0.95rem',
-      fontWeight: 800,
-      boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
-      cursor: 'pointer',
-    }}
-  >
-    エリア別店舗情報はこちら
-  </a>
-
-  <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
-    都道府県 → 市区町村 → 店舗詳細（買えた率/コメント）
-  </div>
-</div>
-
-
-        {/* オーナー向け導線（検索窓の後） */}
-        <div
-          style={{
-            marginTop: '1.6rem',
-            textAlign: 'center',
-          }}
-        >
-          {/* 区切り（任意：別コンテンツ感を強める） */}
-          <div
-            style={{
-              height: 1,
-              backgroundColor: '#e2e8f0',
-              margin: '0 auto 1rem',
-              width: '70%',
-              borderRadius: 999,
-            }}
-          />
-
-          <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>店舗様向け</div>
-
-          <a
-            href={OWNER_FORM_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={() =>
-              sendGAEvent('event', 'owner_form_click', {
-                placement: 'after_search_box',
-              })
-            }
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              padding: '0.75rem 1.1rem',
-              borderRadius: 999,
-              border: '1px solid #fdba74',
-              backgroundColor: '#fff7ed',
-              color: '#9a3412',
-              textDecoration: 'none',
-              fontSize: '0.95rem',
-              fontWeight: 800,
-              boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
-            }}
-            onMouseOver={(e) => {
-              e.currentTarget.style.backgroundColor = '#ffedd5';
-            }}
-            onMouseOut={(e) => {
-              e.currentTarget.style.backgroundColor = '#fff7ed';
-            }}
-          >
-            在庫連携はこちら
-          </a>
-
-          <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
-            無料トライアル実施中。店舗名・住所公開が参加条件です。
-          </div>
-        </div>
-
+        {/* 2) 検索結果 */}
         {(hasSearched || loading) && (
           <section style={{ marginTop: '2rem' }}>
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 800, marginBottom: '1rem', color: '#334155' }}>
-              検索結果
+            <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12 }}>
+              <h2 style={{ fontSize: '1.1rem', fontWeight: 800, marginBottom: '1rem', color: '#334155' }}>
+                検索結果
+                {stores.length > 0 && (
+                  <span style={{ fontSize: '0.9rem', fontWeight: 400, marginLeft: '0.5rem', color: '#64748b' }}>
+                    {stores.length}件見つかりました
+                  </span>
+                )}
+              </h2>
+
               {stores.length > 0 && (
-                <span style={{ fontSize: '0.9rem', fontWeight: 400, marginLeft: '0.5rem', color: '#64748b' }}>
-                  {stores.length}件見つかりました
-                </span>
+                <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: '0.8rem', color: '#64748b' }}>並べ替え</span>
+                  <select
+                    value={sortMode}
+                    onChange={(e) => {
+                      const v = e.target.value === 'score' ? 'score' : 'distance';
+                      setSortMode(v);
+                      setUserChangedSort(true);
+                      sendGAEvent('event', 'sort_changed', {
+                        sort_mode: v,
+                        placement: 'search_results_header',
+                      });
+                    }}
+                    style={{
+                      padding: '0.45rem 0.6rem',
+                      borderRadius: 10,
+                      border: '1px solid #cbd5e1',
+                      backgroundColor: '#fff',
+                      color: '#0f172a',
+                      fontSize: '0.85rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                    aria-label="sort-mode"
+                  >
+                    <option value="distance">距離順</option>
+                    <option value="score">買える確率が高い順</option>
+                  </select>
+                </div>
               )}
-            </h2>
+            </div>
 
             {stores.length === 0 && !loading && !error && (
-              <div
-                style={{
-                  textAlign: 'center',
-                  padding: '2rem',
-                  color: '#6b7280',
-                  backgroundColor: '#fff',
-                  borderRadius: 16,
-                }}
-              >
+              <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280', backgroundColor: '#fff', borderRadius: 16 }}>
                 <p>{notice ?? `半径${RADIUS_KM}km以内にデータが見つかりませんでした。`}</p>
               </div>
             )}
 
             <ul style={{ display: 'grid', gap: '1rem', listStyle: 'none', padding: 0, margin: 0 }}>
-              {stores.map((store, index) => {
-                const displayName =
-                  pickFirstNonEmptyString([store.name, store.store_name, store.shop_name]) ?? '店舗名';
+              {sortedStores.map((store, index) => {
+                const displayName = pickFirstNonEmptyString([store.name, store.store_name, store.shop_name]) ?? '店舗名';
 
-                const displayAddressRaw =
-                  pickFirstNonEmptyString([store.address, store.full_address, store.road_address]) ?? '';
-
+                const displayAddressRaw = pickFirstNonEmptyString([store.address, store.full_address, store.road_address]) ?? '';
                 const displayAddress = stripPostalCode(displayAddressRaw);
 
-                const displayPhone =
-                  pickFirstNonEmptyString([store.phone, store.tel, store.telephone]) ?? '';
-
+                const displayPhone = pickFirstNonEmptyString([store.phone, store.tel, store.telephone]) ?? '';
                 const phoneDigits = displayPhone ? normalizePhoneForTel(displayPhone) : null;
 
                 const mapUrl = buildMapUrl({
@@ -899,19 +988,9 @@ export default function HomePage() {
                       boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.05)',
                     }}
                   >
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        justifyContent: 'space-between',
-                        gap: 12,
-                        marginBottom: '0.5rem',
-                      }}
-                    >
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: '0.5rem' }}>
                       <div style={{ fontWeight: 700, fontSize: '1.05rem', color: '#1e293b' }}>{displayName}</div>
-                      {isHighRisk && (
-                        <span style={pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })}>要注意</span>
-                      )}
+                      {isHighRisk && <span style={pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })}>要注意</span>}
                     </div>
 
                     {store.distance_m != null && (
@@ -920,16 +999,10 @@ export default function HomePage() {
                       </div>
                     )}
 
+                    {renderScoreCompact(store)}
                     {renderCommunityCompact(store)}
 
-                    <div
-                      style={{
-                        marginTop: '1rem',
-                        paddingTop: '1rem',
-                        borderTop: '1px solid #f1f5f9',
-                        fontSize: '0.9rem',
-                      }}
-                    >
+                    <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid #f1f5f9', fontSize: '0.9rem' }}>
                       <div style={{ marginBottom: '0.4rem' }}>
                         {mapUrl ? (
                           <a
@@ -996,6 +1069,97 @@ export default function HomePage() {
             </ul>
           </section>
         )}
+
+        {/* 3) エリア別店舗情報 */}
+        <div style={{ marginTop: '1.6rem', textAlign: 'center' }}>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>エリア別の店舗情報</div>
+
+<Link
+  href="/areas"
+  prefetch={false}
+  onClick={() =>
+    sendGAEvent('event', 'area_pages_click', {
+      placement: 'below_search_results',
+    })
+  }
+  style={{
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    padding: '0.75rem 1.1rem',
+    borderRadius: 999,
+    border: '1px solid #bfdbfe',
+    backgroundColor: '#eff6ff',
+    color: '#1d4ed8',
+    textDecoration: 'underline',
+    textUnderlineOffset: 2,
+    fontSize: '0.95rem',
+    fontWeight: 800,
+    boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
+    cursor: 'pointer',
+  }}
+>
+  エリア別店舗情報はこちら
+</Link>
+
+          <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
+            都道府県 → 市区町村 → 店舗詳細（買えた率/コメント）
+          </div>
+        </div>
+
+        {/* 4) 在庫連携はこちら */}
+        <div style={{ marginTop: '1.6rem', textAlign: 'center' }}>
+          <div
+            style={{
+              height: 1,
+              backgroundColor: '#e2e8f0',
+              margin: '0 auto 1rem',
+              width: '70%',
+              borderRadius: 999,
+            }}
+          />
+
+          <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>店舗様向け</div>
+
+          <a
+            href={OWNER_FORM_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() =>
+              sendGAEvent('event', 'owner_form_click', {
+                placement: 'below_search_results',
+              })
+            }
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              padding: '0.75rem 1.1rem',
+              borderRadius: 999,
+              border: '1px solid #fdba74',
+              backgroundColor: '#fff7ed',
+              color: '#9a3412',
+              textDecoration: 'none',
+              fontSize: '0.95rem',
+              fontWeight: 800,
+              boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+            }}
+            onMouseOver={(e) => {
+              e.currentTarget.style.backgroundColor = '#ffedd5';
+            }}
+            onMouseOut={(e) => {
+              e.currentTarget.style.backgroundColor = '#fff7ed';
+            }}
+          >
+            在庫連携はこちら
+          </a>
+
+          <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
+            無料トライアル実施中。店舗名・住所公開が参加条件です。
+          </div>
+        </div>
       </div>
     </main>
   );

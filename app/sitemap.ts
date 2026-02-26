@@ -1,100 +1,113 @@
 import type { MetadataRoute } from 'next';
 import { supabase } from '@/lib/supabaseClient';
 
-export const revalidate = 86400; // 24時間キャッシュ
+export const revalidate = 3600;
 
-// URLを絶対URLにする（sitemapは絶対URLが推奨）
-function getSiteUrl() {
-  const fromEnv = process.env.NEXT_PUBLIC_SITE_URL;
-  if (fromEnv) return fromEnv.replace(/\/+$/, '');
+type StoreSlugRow = {
+  pref: string | null;
+  city: string | null;
+  slug: string | null;
+};
 
-  // Vercelの標準環境変数（あれば）
-  const vercel = process.env.VERCEL_URL;
-  if (vercel) return `https://${vercel}`.replace(/\/+$/, '');
+const SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL ||
+  process.env.SITE_URL ||
+  'https://qpick-web.vercel.app';
 
-  return 'http://localhost:3000';
+function normalizeSlug(v: string): string {
+  return decodeURIComponent(v).trim().toLowerCase();
 }
 
-// Supabaseは1回のselectで上限が出ることがあるのでページング
-async function fetchAllStoresForSitemap() {
+function safeText(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+async function fetchAllStoreSlugs(): Promise<StoreSlugRow[]> {
   const PAGE_SIZE = 1000;
-  let from = 0;
+  const CONCURRENCY = 6;
 
-  const prefSet = new Set<string>();
-  const citySetByPref = new Map<string, Set<string>>();
-  const storeUrls: Array<{ pref: string; city: string; slug: string }> = [];
+  const { count, error: countError } = await supabase
+    .from('stores')
+    .select('id', { count: 'exact', head: true });
 
-  while (true) {
-    const { data, error } = await supabase
-      .from('stores')
-      .select('pref, city, slug')
-      .not('pref', 'is', null)
-      .not('city', 'is', null)
-      .not('slug', 'is', null)
-      .range(from, from + PAGE_SIZE - 1);
+  if (countError) throw new Error(countError.message);
 
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
+  const total = Number(count ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return [];
 
-    for (const row of data as any[]) {
-      const pref = String(row.pref ?? '').trim().toLowerCase();
-      const city = String(row.city ?? '').trim();
-      const slug = String(row.slug ?? '').trim();
+  const pages = Math.ceil(total / PAGE_SIZE);
+  const out: StoreSlugRow[] = [];
 
-      if (!pref || !city || !slug) continue;
+  for (let start = 0; start < pages; start += CONCURRENCY) {
+    const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
 
-      prefSet.add(pref);
+    const results = await Promise.all(
+      batch.map(async (page): Promise<StoreSlugRow[]> => {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
 
-      if (!citySetByPref.has(pref)) citySetByPref.set(pref, new Set<string>());
-      citySetByPref.get(pref)!.add(city);
+        const { data, error } = await supabase
+          .from('stores')
+          .select('pref, city, slug')
+          .range(from, to);
 
-      storeUrls.push({ pref, city, slug });
-    }
+        if (error) throw new Error(error.message);
+        return (data ?? []) as unknown as StoreSlugRow[];
+      })
+    );
 
-    if (data.length < PAGE_SIZE) break;
-    from += PAGE_SIZE;
+    for (const rows of results) out.push(...rows);
   }
 
-  return { prefSet, citySetByPref, storeUrls };
+  return out;
 }
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const SITE = getSiteUrl();
   const now = new Date();
 
-  const { prefSet, citySetByPref, storeUrls } = await fetchAllStoresForSitemap();
+  const base: MetadataRoute.Sitemap = [
+    { url: `${SITE_URL}/`, lastModified: now },
+    { url: `${SITE_URL}/areas`, lastModified: now },
+    { url: `${SITE_URL}/terms`, lastModified: now },
+  ];
 
-  const items: MetadataRoute.Sitemap = [];
+  const rows = await fetchAllStoreSlugs();
 
-  // 固定ページ（必要に応じて増やしてください）
-  items.push({ url: `${SITE}/`, lastModified: now });
-  items.push({ url: `${SITE}/terms`, lastModified: now });
-  items.push({ url: `${SITE}/privacy-policy`, lastModified: now });
-items.push({ url: `${SITE}/areas`, lastModified: now });
+  // /pref, /pref/city, /pref/city/slug を stores から生成
+  const prefSet = new Set<string>();
+  const citySet = new Set<string>(); // key = `${pref}||${city}`
+  const storeSet = new Set<string>(); // key = `${pref}||${city}||${slug}`
 
-  // 都道府県
-  for (const pref of Array.from(prefSet)) {
-    items.push({ url: `${SITE}/${encodeURIComponent(pref)}`, lastModified: now });
+  for (const r of rows) {
+    const pref = safeText(r.pref);
+    const city = safeText(r.city);
+    const slug = safeText(r.slug);
 
-    // 市区町村
-    const cities = citySetByPref.get(pref);
-    if (cities) {
-      for (const city of Array.from(cities)) {
-        items.push({
-          url: `${SITE}/${encodeURIComponent(pref)}/${encodeURIComponent(city)}`,
-          lastModified: now,
-        });
-      }
-    }
+    if (pref) prefSet.add(normalizeSlug(pref));
+    if (pref && city) citySet.add(`${normalizeSlug(pref)}||${city}`);
+    if (pref && city && slug) storeSet.add(`${normalizeSlug(pref)}||${city}||${slug}`);
   }
 
-  // 店舗詳細
-  for (const s of storeUrls) {
-    items.push({
-      url: `${SITE}/${encodeURIComponent(s.pref)}/${encodeURIComponent(s.city)}/${encodeURIComponent(s.slug)}`,
+  const prefUrls: MetadataRoute.Sitemap = Array.from(prefSet).map((pref) => ({
+    url: `${SITE_URL}/${encodeURIComponent(pref)}`,
+    lastModified: now,
+  }));
+
+  const cityUrls: MetadataRoute.Sitemap = Array.from(citySet).map((key) => {
+    const [pref, city] = key.split('||');
+    return {
+      url: `${SITE_URL}/${encodeURIComponent(pref)}/${encodeURIComponent(city)}`,
       lastModified: now,
-    });
-  }
+    };
+  });
 
-  return items;
+  const storeUrls: MetadataRoute.Sitemap = Array.from(storeSet).map((key) => {
+    const [pref, city, slug] = key.split('||');
+    return {
+      url: `${SITE_URL}/${encodeURIComponent(pref)}/${encodeURIComponent(city)}/${encodeURIComponent(slug)}`,
+      lastModified: now,
+    };
+  });
+
+  return [...base, ...prefUrls, ...cityUrls, ...storeUrls];
 }
