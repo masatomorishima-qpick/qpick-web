@@ -1,19 +1,39 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { sendPush } from '@/lib/pushServer';
+import crypto from 'crypto';
 
 export const runtime = 'nodejs';
 
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
+function fp(s: string) {
+  // 先頭8桁だけ（秘密は出さない）
+  return crypto.createHash('sha256').update(s).digest('hex').slice(0, 8);
+}
+
 function assertWebhookAuth(req: Request) {
-  // ✅ 末尾の空白/改行事故を吸収
   const expected = (process.env.WEBHOOK_SHARED_SECRET || '').trim();
   if (!expected) throw new Error('WEBHOOK_SHARED_SECRET 未設定');
 
-  // ✅ authorizationもtrim（全角スペースは吸収できないのでコピペ時は注意）
-  const auth = (req.headers.get('authorization') || '').trim();
-  if (auth !== `Bearer ${expected}`) throw new Error('unauthorized');
+  const raw = (req.headers.get('authorization') || '').trim();
+
+  // ✅ Bearerの表記ゆれ/余計な空白を吸収
+  const token =
+    raw.toLowerCase().startsWith('bearer ')
+      ? raw.slice(7).trim()
+      : '';
+
+  if (token !== expected) {
+    console.log('[webhook] unauthorized', {
+      expected_len: expected.length,
+      token_len: token.length,
+      expected_fp: fp(expected),
+      token_fp: token ? fp(token) : null,
+      raw_head: raw.slice(0, 12), // "Bearer ..." になってるか確認用
+    });
+    throw new Error('unauthorized');
+  }
 }
 
 function areaKeyFromLatLng(lat: number, lng: number) {
@@ -31,7 +51,7 @@ type WebhookPayload = {
 
 export async function POST(req: Request) {
   try {
-    // ✅ 401切り分け用：認証前に到達ログを残す（secretそのものは出さない）
+    // ✅ 認証前に到達ログ（secret自体は出さない）
     console.log('[webhook] hit', new Date().toISOString(), {
       hasSecret: !!process.env.WEBHOOK_SHARED_SECRET,
       secretLen: (process.env.WEBHOOK_SHARED_SECRET || '').trim().length,
@@ -126,7 +146,7 @@ export async function POST(req: Request) {
 
     const title = '近くの店舗で買えた報告がありました';
     const body = '買えた報告が入りました（直近2時間以内）。在庫を保証するものではありません。';
-    const url = '/'; // あとで「検索済みSKUページ」などにしてOK
+    const url = '/';
 
     let sent = 0;
     for (const s of subs || []) {
