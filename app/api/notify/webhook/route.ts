@@ -7,10 +7,12 @@ export const runtime = 'nodejs';
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
 function assertWebhookAuth(req: Request) {
-  const expected = process.env.WEBHOOK_SHARED_SECRET;
+  // ✅ 末尾の空白/改行事故を吸収
+  const expected = (process.env.WEBHOOK_SHARED_SECRET || '').trim();
   if (!expected) throw new Error('WEBHOOK_SHARED_SECRET 未設定');
 
-  const auth = req.headers.get('authorization') || '';
+  // ✅ authorizationもtrim（全角スペースは吸収できないのでコピペ時は注意）
+  const auth = (req.headers.get('authorization') || '').trim();
   if (auth !== `Bearer ${expected}`) throw new Error('unauthorized');
 }
 
@@ -29,6 +31,13 @@ type WebhookPayload = {
 
 export async function POST(req: Request) {
   try {
+    // ✅ 401切り分け用：認証前に到達ログを残す（secretそのものは出さない）
+    console.log('[webhook] hit', new Date().toISOString(), {
+      hasSecret: !!process.env.WEBHOOK_SHARED_SECRET,
+      secretLen: (process.env.WEBHOOK_SHARED_SECRET || '').trim().length,
+      hasAuthHeader: !!req.headers.get('authorization'),
+    });
+
     assertWebhookAuth(req);
 
     const payload = (await req.json()) as WebhookPayload;
