@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 
+import WatchNotifyBar from '@/components/WatchNotifyBar';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import StoreFeedback from '@/components/StoreFeedback';
 import { supabase } from '@/lib/supabaseClient';
@@ -177,6 +178,7 @@ export default function HomePage() {
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
+const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
 
   const [requestSent, setRequestSent] = useState(false);
 
@@ -502,6 +504,7 @@ if (!detail) return;
   };
 
   const clearSelection = () => {
+setUserPos(null);
     setSelectedCandidate(null);
     setProductId(null);
     setHighRiskStoreIds([]);
@@ -554,6 +557,8 @@ if (!detail) return;
 
       const lat = pos.coords.latitude;
       const lng = pos.coords.longitude;
+
+setUserPos({ lat, lng });
 
       const params = new URLSearchParams({
         productId: String(c.id),
@@ -951,6 +956,18 @@ if (!detail) return;
                 </div>
               )}
             </div>
+
+{/* ✅ 近隣通知（買えた報告のみ） */}
+{stores.length > 0 && productId !== null && selectedCandidate && userPos && (
+  <div style={{ marginBottom: '1rem' }}>
+    <WatchNotifyBar
+      productId={productId}
+      productName={selectedCandidate.name}
+      lat={userPos.lat}
+      lng={userPos.lng}
+    />
+  </div>
+)}
 
             {stores.length === 0 && !loading && !error && (
               <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280', backgroundColor: '#fff', borderRadius: 16 }}>
