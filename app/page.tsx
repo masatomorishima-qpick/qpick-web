@@ -25,16 +25,13 @@ type StoreCommunity = {
 
 type StoreScore = {
   ttlHours?: number | null;
-
   foundCount?: number | null;
   notFoundCount?: number | null;
   total?: number | null;
-
   lastFoundAt?: string | null;
   lastNotFoundAt?: string | null;
   lastAnyAt?: string | null;
   lastStatus?: 'found' | 'not_found' | null;
-
   label?: '高' | '中' | '低' | '—' | string | null;
   rank?: number | null;
 };
@@ -65,6 +62,41 @@ type Store = {
 
   community?: StoreCommunity | null;
   score?: StoreScore | null;
+};
+
+type HandlingApiStore = {
+  store_id: string;
+  chain?: string | null;
+
+  name?: string | null;
+  address?: string | null;
+  phone?: string | null;
+
+  latitude?: number | null;
+  longitude?: number | null;
+
+  distance_m?: number | null;
+
+  found_count?: number | null;
+  not_found_count?: number | null;
+  total_reports?: number | null;
+
+  last_found_at?: string | null;
+  last_not_found_at?: string | null;
+  last_any_at?: string | null;
+  last_reported_at?: string | null;
+
+  last_status?: 'found' | 'not_found' | null;
+  status_label?: string | null;
+  info_rank?: number | null;
+};
+
+type HandlingApiResponse = {
+  productId: number;
+  ttlHours: number;
+  radiusKm?: number;
+  count?: number;
+  stores: HandlingApiStore[];
 };
 
 const OWNER_FORM_URL =
@@ -135,7 +167,11 @@ function formatTimeAgo(iso: string | null | undefined): string {
   return `${day}日前`;
 }
 
-function calcScoreLabelRank(foundCount: number, notFoundCount: number, lastStatus: 'found' | 'not_found' | null) {
+function calcScoreLabelRank(
+  foundCount: number,
+  notFoundCount: number,
+  lastStatus: 'found' | 'not_found' | null
+) {
   const total = foundCount + notFoundCount;
   if (total === 0) return { label: '—' as const, rank: 0 as const };
   if (notFoundCount >= 1 && foundCount === 0) return { label: '低' as const, rank: 1 as const };
@@ -155,14 +191,25 @@ function calcCommunityLabel(found: number, notFound: number) {
 }
 
 export default function HomePage() {
-  const RADIUS_KM = 5.0;
+  const RADIUS_KM = 5.0; // 既存の「近くの店舗」検索半径
+  const HANDLING_RADIUS_KM = 10; // 今回追加：取扱店ビューだけ 10km
+  const HANDLING_TTL_HOURS = 168;
   const MIN_SUGGEST_CHARS = 2;
   const SUGGEST_DEBOUNCE_MS = 250;
 
   const [keyword, setKeyword] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // 近くの店舗（既存検索）
   const [stores, setStores] = useState<Store[]>([]);
+
+  // 取扱店（新機能）
+  const [handlingStores, setHandlingStores] = useState<Store[]>([]);
+  const [handlingAvailable, setHandlingAvailable] = useState(false);
+  const [handlingLoading, setHandlingLoading] = useState(false);
+  const [handlingError, setHandlingError] = useState<string | null>(null);
+  const [handlingFetched, setHandlingFetched] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
 
   const [hasSearched, setHasSearched] = useState(false);
@@ -178,9 +225,12 @@ export default function HomePage() {
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
-const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
+  const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
 
   const [requestSent, setRequestSent] = useState(false);
+
+  type ViewMode = 'nearby' | 'handling';
+  const [viewMode, setViewMode] = useState<ViewMode>('nearby');
 
   const trimmedKeyword = useMemo(() => keyword.trim(), [keyword]);
 
@@ -238,52 +288,174 @@ const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null
       .trim();
   };
 
+  type VoteSuccessDetail = {
+    storeId: string;
+    productId: number;
+    status: 'found' | 'not_found';
+    createdAt: string;
+  };
 
-type VoteSuccessDetail = {
-  storeId: string;
-  productId: number;
-  status: 'found' | 'not_found';
-  createdAt: string;
-};
+  const buildScoreFromCounts = (args: {
+    ttlHours: number;
+    foundCount: number;
+    notFoundCount: number;
+    lastFoundAt: string | null;
+    lastNotFoundAt: string | null;
+    lastAnyAt: string | null;
+    lastStatus: 'found' | 'not_found' | null;
+    rankOverride?: number | null;
+    labelOverride?: string | null;
+  }): StoreScore => {
+    const calculated = calcScoreLabelRank(args.foundCount, args.notFoundCount, args.lastStatus);
+    return {
+      ttlHours: args.ttlHours,
+      foundCount: args.foundCount,
+      notFoundCount: args.notFoundCount,
+      total: args.foundCount + args.notFoundCount,
+      lastFoundAt: args.lastFoundAt,
+      lastNotFoundAt: args.lastNotFoundAt,
+      lastAnyAt: args.lastAnyAt,
+      lastStatus: args.lastStatus,
+      label: args.labelOverride ?? calculated.label,
+      rank: Number.isFinite(Number(args.rankOverride)) ? Number(args.rankOverride) : calculated.rank,
+    };
+  };
+
+  const mapHandlingToStore = (row: HandlingApiStore, ttlHours: number): Store => {
+    const foundCount = Number(row.found_count ?? 0);
+    const notFoundCount = Number(row.not_found_count ?? 0);
+    const lastStatus = row.last_status ?? null;
+
+    const lastAnyAt = row.last_any_at ?? row.last_reported_at ?? null;
+
+    const score = buildScoreFromCounts({
+      ttlHours,
+      foundCount,
+      notFoundCount,
+      lastFoundAt: row.last_found_at ?? (lastStatus === 'found' ? lastAnyAt : null),
+      lastNotFoundAt: row.last_not_found_at ?? (lastStatus === 'not_found' ? lastAnyAt : null),
+      lastAnyAt,
+      lastStatus,
+      rankOverride: row.info_rank ?? null,
+      labelOverride: null,
+    });
+
+    return {
+      id: String(row.store_id),
+      chain: row.chain ?? null,
+      name: row.name ?? null,
+      address: row.address ?? null,
+      phone: row.phone ?? null,
+      latitude: row.latitude ?? null,
+      longitude: row.longitude ?? null,
+      distance_m: row.distance_m ?? null,
+      score,
+      community: null,
+    };
+  };
+
+  const fetchHandlingStores = async (pid: number, lat: number | null, lng: number | null) => {
+    setHandlingLoading(true);
+    setHandlingError(null);
+
+    try {
+      if (lat == null || lng == null) {
+        throw new Error(
+          `取扱店ビューは現在地から${HANDLING_RADIUS_KM}km以内で絞り込むため、位置情報の取得が必要です。`
+        );
+      }
+
+      const params = new URLSearchParams({
+        productId: String(pid),
+        lat: String(lat),
+        lng: String(lng),
+        radiusKm: String(HANDLING_RADIUS_KM),
+        ttlHours: String(HANDLING_TTL_HOURS),
+      });
+
+      const res = await fetch(`/api/handling-stores?${params.toString()}`, {
+        cache: 'no-store',
+      });
+
+      if (res.status === 404) {
+        // handling_view = false
+        setHandlingAvailable(false);
+        setHandlingStores([]);
+        setHandlingFetched(true);
+        return;
+      }
+
+      const json: unknown = await res.json().catch(() => ({}));
+      const maybeError =
+        typeof json === 'object' && json !== null && 'error' in json ? (json as { error?: unknown }).error : undefined;
+
+      if (!res.ok) {
+        const msg = typeof maybeError === 'string' ? maybeError : '取扱店 API の呼び出しに失敗しました';
+        throw new Error(msg);
+      }
+
+      const payload = json as Partial<HandlingApiResponse>;
+      const ttl = Number(payload.ttlHours ?? HANDLING_TTL_HOURS);
+      const rows = Array.isArray(payload.stores) ? (payload.stores as HandlingApiStore[]) : [];
+      const mapped = rows.map((r) => mapHandlingToStore(r, ttl));
+
+      setHandlingAvailable(true);
+      setHandlingStores(mapped);
+      setHandlingFetched(true);
+
+      // 取扱店は基本「情報あり順」が自然
+      if (!userChangedSort) setSortMode('score');
+    } catch (e: unknown) {
+      setHandlingAvailable(false);
+      setHandlingStores([]);
+      setHandlingFetched(true);
+      setHandlingError(getErrorMessage(e) || '取扱店の取得に失敗しました。');
+    } finally {
+      setHandlingLoading(false);
+    }
+  };
+
+  const ensureHandlingLoaded = async () => {
+    if (!productId) return;
+    if (handlingFetched || handlingLoading) return;
+
+    const lat = userPos?.lat ?? null;
+    const lng = userPos?.lng ?? null;
+    await fetchHandlingStores(productId, lat, lng);
+  };
 
   // -----------------------------
-  // ✅ 投票成功イベントを受けて、店舗カードを即時更新
+  // ✅ 投票成功イベントを受けて、店舗カードを即時更新（近くの店舗/取扱店 両方）
   // -----------------------------
   useEffect(() => {
     const handler = (ev: Event) => {
-const detail = (ev as CustomEvent<VoteSuccessDetail>).detail;
-if (!detail) return;
-
+      const detail = (ev as CustomEvent<VoteSuccessDetail>).detail;
       if (!detail) return;
+
       if (!productId || Number(detail.productId) !== Number(productId)) return;
 
-      setStores((prev) => {
+      const apply = (prev: Store[]) => {
         return prev.map((s) => {
           if (String(s.id) !== String(detail.storeId)) return s;
 
           const createdAt = detail.createdAt;
 
-          // --- score 更新（TTL 6h）
-          const ttlHours = Number(s.score?.ttlHours ?? 6);
+          const ttlHours = Number(s.score?.ttlHours ?? HANDLING_TTL_HOURS);
           const foundCount = Number(s.score?.foundCount ?? 0) + (detail.status === 'found' ? 1 : 0);
           const notFoundCount = Number(s.score?.notFoundCount ?? 0) + (detail.status === 'not_found' ? 1 : 0);
           const lastStatus = detail.status;
-          const { label, rank } = calcScoreLabelRank(foundCount, notFoundCount, lastStatus);
 
-          const nextScore: StoreScore = {
+          const nextScore = buildScoreFromCounts({
             ttlHours,
             foundCount,
             notFoundCount,
-            total: foundCount + notFoundCount,
             lastFoundAt: detail.status === 'found' ? createdAt : (s.score?.lastFoundAt ?? null),
             lastNotFoundAt: detail.status === 'not_found' ? createdAt : (s.score?.lastNotFoundAt ?? null),
             lastAnyAt: createdAt,
             lastStatus,
-            label,
-            rank,
-          };
+          });
 
-          // --- community 更新（30日。ラベル再計算は軽くやる）
+          // community（近くの店舗用）もあれば軽く更新
           const c = s.community ?? null;
           const cFound = Number(c?.found ?? 0) + (detail.status === 'found' ? 1 : 0);
           const cNotFound = Number(c?.notFound ?? 0) + (detail.status === 'not_found' ? 1 : 0);
@@ -297,18 +469,14 @@ if (!detail) return;
                 lastReportAt: createdAt,
                 label: calcCommunityLabel(cFound, cNotFound),
               }
-            : {
-                windowDays: 30,
-                found: cFound,
-                notFound: cNotFound,
-                total: cTotal,
-                lastReportAt: createdAt,
-                label: calcCommunityLabel(cFound, cNotFound),
-              };
+            : null;
 
           return { ...s, score: nextScore, community: nextCommunity };
         });
-      });
+      };
+
+      setStores((prev) => apply(prev));
+      setHandlingStores((prev) => apply(prev));
     };
 
     window.addEventListener('qpick_vote_success', handler as EventListener);
@@ -380,36 +548,38 @@ if (!detail) return;
     );
   };
 
-  const renderScoreCompact = (store: Store) => {
+  // ✅ 近くの店舗 / 取扱店 で表現を統一（報告ベース）
+  const renderFreshStatusCompact = (store: Store) => {
     const s = store?.score;
-    if (!s) return null;
 
-    const label = (s.label ?? '—') as string;
-    const ttlHours = Number(s.ttlHours ?? 6);
-    const lastAnyAt = typeof s.lastAnyAt === 'string' ? s.lastAnyAt : null;
+    const ttlHours = Number(s?.ttlHours ?? HANDLING_TTL_HOURS);
+    const found = Number(s?.foundCount ?? 0);
+    const notFound = Number(s?.notFoundCount ?? 0);
+    const lastAnyAt = typeof s?.lastAnyAt === 'string' ? s.lastAnyAt : null;
 
-    const isNone = label === '—';
-    const pillStyle =
-      label === '高'
-        ? pill({ bg: '#ecfdf5', bd: '#bbf7d0', fg: '#166534' })
-        : label === '中'
-        ? pill({ bg: '#eff6ff', bd: '#bfdbfe', fg: '#1d4ed8' })
-        : label === '低'
-        ? pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })
-        : pill({ bg: '#f3f4f6', bd: '#e5e7eb', fg: '#374151' });
+    let text = '報告なし';
+    let badge = pill({ bg: '#f3f4f6', bd: '#e5e7eb', fg: '#374151' });
+
+    if (found > 0) {
+      text = '買えた報告あり';
+      badge = pill({ bg: '#ecfdf5', bd: '#bbf7d0', fg: '#166534' });
+    } else if (notFound > 0) {
+      // not_found は煽らない
+      text = '売り切れ報告あり';
+      badge = pill({ bg: '#fff7ed', bd: '#fed7aa', fg: '#9a3412' });
+    }
 
     return (
       <div style={{ marginTop: '0.5rem' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <span style={pillStyle}>買える確率 {label}</span>
+          <span style={badge}>{text}</span>
           <span style={{ fontSize: '0.8rem', color: '#475569' }}>最終報告 {formatTimeAgo(lastAnyAt)}</span>
           <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>集計 直近{ttlHours}時間</span>
         </div>
-        {isNone && (
-          <div style={{ marginTop: 6, fontSize: '0.85rem', color: '#64748b' }}>
-            情報がありません。買えた・買えなかったで共有できます。
-          </div>
-        )}
+
+        <div style={{ marginTop: 6, fontSize: '0.85rem', color: '#64748b' }}>
+          買えた {found}・売り切れ {notFound}
+        </div>
       </div>
     );
   };
@@ -494,33 +664,59 @@ if (!detail) return;
     setKeyword(c.name);
 
     setStores([]);
+    setHandlingStores([]);
+    setHandlingAvailable(false);
+    setHandlingError(null);
+    setHandlingFetched(false);
+
     setHighRiskStoreIds([]);
     setHasSearched(false);
     setProductId(null);
     setError(null);
 
+    setViewMode('nearby');
     setSortMode('distance');
     setUserChangedSort(false);
   };
 
   const clearSelection = () => {
-setUserPos(null);
+    setUserPos(null);
+
     setSelectedCandidate(null);
     setProductId(null);
-    setHighRiskStoreIds([]);
+
     setStores([]);
+    setHandlingStores([]);
+    setHandlingAvailable(false);
+    setHandlingError(null);
+    setHandlingFetched(false);
+
+    setHighRiskStoreIds([]);
     setHasSearched(false);
     setNotice(null);
     setError(null);
 
+    setViewMode('nearby');
     setSortMode('distance');
     setUserChangedSort(false);
   };
 
-  const sortedStores = useMemo(() => {
-    if (sortMode === 'distance') return stores;
+  const shownStores = useMemo(() => {
+    return viewMode === 'handling' ? handlingStores : stores;
+  }, [viewMode, handlingStores, stores]);
 
-    const copy = [...stores];
+  const sortedStores = useMemo(() => {
+    const copy = [...shownStores];
+
+    if (sortMode === 'distance') {
+      copy.sort((a, b) => {
+        const ad = Number(a.distance_m ?? Number.POSITIVE_INFINITY);
+        const bd = Number(b.distance_m ?? Number.POSITIVE_INFINITY);
+        return ad - bd;
+      });
+      return copy;
+    }
+
     copy.sort((a, b) => {
       const ar = Number(a.score?.rank ?? 0);
       const br = Number(b.score?.rank ?? 0);
@@ -535,15 +731,30 @@ setUserPos(null);
       return ad - bd;
     });
     return copy;
-  }, [stores, sortMode]);
+  }, [shownStores, sortMode]);
+
+  const emptyMessage = useMemo(() => {
+    if (viewMode === 'handling' && handlingAvailable) {
+      return `現在地から${HANDLING_RADIUS_KM}km以内に取扱店が見つかりませんでした。`;
+    }
+    return notice ?? `半径${RADIUS_KM}km以内にデータが見つかりませんでした。`;
+  }, [viewMode, handlingAvailable, notice]);
 
   const runSearch = async (c: Candidate) => {
     setLoading(true);
     setError(null);
     setNotice(null);
+
     setStores([]);
+    setHandlingStores([]);
+    setHandlingAvailable(false);
+    setHandlingError(null);
+    setHandlingFetched(false);
+
     setHighRiskStoreIds([]);
     setHasSearched(false);
+
+    setViewMode('nearby');
 
     setUserChangedSort(false);
     setSortMode('distance');
@@ -558,7 +769,7 @@ setUserPos(null);
       const lat = pos.coords.latitude;
       const lng = pos.coords.longitude;
 
-setUserPos({ lat, lng });
+      setUserPos({ lat, lng });
 
       const params = new URLSearchParams({
         productId: String(c.id),
@@ -628,9 +839,14 @@ setUserPos({ lat, lng });
       } catch {}
 
       setStores(storesFromApi);
-      setProductId(Number.isFinite(apiProductId) ? apiProductId : c.id);
+      const pid = Number.isFinite(apiProductId) ? apiProductId : c.id;
+      setProductId(pid);
       setHighRiskStoreIds(apiHighRisk);
       setHasSearched(true);
+
+      // 取扱店があるか“裏で”確認＆あればキャッシュ
+      // handling_view = false の商品なら 404 → handlingAvailable = false
+      void fetchHandlingStores(pid, lat, lng);
 
       if (storesFromApi.length === 0) {
         setNotice(
@@ -653,6 +869,11 @@ setUserPos({ lat, lng });
       }
 
       setStores([]);
+      setHandlingStores([]);
+      setHandlingAvailable(false);
+      setHandlingError(null);
+      setHandlingFetched(false);
+
       setHighRiskStoreIds([]);
       setHasSearched(false);
       setNotice(null);
@@ -761,13 +982,20 @@ setUserPos({ lat, lng });
                   const v = e.target.value;
                   setKeyword(v);
                   if (selectedCandidate) setSelectedCandidate(null);
+
                   setStores([]);
+                  setHandlingStores([]);
+                  setHandlingAvailable(false);
+                  setHandlingError(null);
+                  setHandlingFetched(false);
+
                   setHighRiskStoreIds([]);
                   setHasSearched(false);
                   setProductId(null);
                   setError(null);
                   setNotice(null);
 
+                  setViewMode('nearby');
                   setSortMode('distance');
                   setUserChangedSort(false);
                 }}
@@ -917,14 +1145,14 @@ setUserPos({ lat, lng });
             <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12 }}>
               <h2 style={{ fontSize: '1.1rem', fontWeight: 800, marginBottom: '1rem', color: '#334155' }}>
                 検索結果
-                {stores.length > 0 && (
+                {shownStores.length > 0 && (
                   <span style={{ fontSize: '0.9rem', fontWeight: 400, marginLeft: '0.5rem', color: '#64748b' }}>
-                    {stores.length}件見つかりました
+                    {shownStores.length}件
                   </span>
                 )}
               </h2>
 
-              {stores.length > 0 && (
+              {shownStores.length > 0 && (
                 <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ fontSize: '0.8rem', color: '#64748b' }}>並べ替え</span>
                   <select
@@ -951,27 +1179,99 @@ setUserPos({ lat, lng });
                     aria-label="sort-mode"
                   >
                     <option value="distance">距離順</option>
-                    <option value="score">買える確率が高い順</option>
+                    <option value="score">情報あり順</option>
                   </select>
                 </div>
               )}
             </div>
 
-{/* ✅ 近隣通知（買えた報告のみ） */}
-{stores.length > 0 && productId !== null && selectedCandidate && userPos && (
-  <div style={{ marginBottom: '1rem' }}>
-    <WatchNotifyBar
-      productId={productId}
-      productName={selectedCandidate.name}
-      lat={userPos.lat}
-      lng={userPos.lng}
-    />
-  </div>
-)}
+            {/* ✅ 限定商品：表示切替（取扱店ビュー） */}
+            {handlingAvailable && (
+              <div style={{ display: 'flex', gap: 8, marginBottom: '0.75rem' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setViewMode('nearby');
+                    if (!userChangedSort) setSortMode('distance');
+                    sendGAEvent('event', 'view_mode_changed', { mode: 'nearby' });
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '0.7rem 0.9rem',
+                    borderRadius: 12,
+                    border: viewMode === 'nearby' ? '2px solid #2563eb' : '1px solid #cbd5e1',
+                    backgroundColor: viewMode === 'nearby' ? '#eff6ff' : '#ffffff',
+                    color: '#0f172a',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  近くの店舗
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setViewMode('handling');
+                    if (!userChangedSort) setSortMode('score');
+                    sendGAEvent('event', 'view_mode_changed', { mode: 'handling' });
+                    await ensureHandlingLoaded();
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '0.7rem 0.9rem',
+                    borderRadius: 12,
+                    border: viewMode === 'handling' ? '2px solid #2563eb' : '1px solid #cbd5e1',
+                    backgroundColor: viewMode === 'handling' ? '#eff6ff' : '#ffffff',
+                    color: '#0f172a',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  取扱店
+                </button>
+              </div>
+            )}
 
-            {stores.length === 0 && !loading && !error && (
+            {viewMode === 'handling' && handlingAvailable && (
+              <div
+                style={{
+                  marginBottom: '1rem',
+                  backgroundColor: '#ffffff',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 14,
+                  padding: '0.85rem 0.95rem',
+                  color: '#475569',
+                  fontSize: '0.9rem',
+                  lineHeight: 1.5,
+                }}
+              >
+                <div style={{ fontWeight: 800, color: '#0f172a', marginBottom: 4 }}>現在地から10km以内の取扱店を表示しています</div>
+                <div>
+                  取扱店リストをもとに絞り込んでいます。実際の在庫状況は店舗により異なるため、「買えた報告あり」「売り切れ報告あり」「報告なし」を参考にしてください。
+                </div>
+              </div>
+            )}
+
+            {viewMode === 'handling' && handlingLoading && (
+              <div style={{ marginBottom: '1rem', color: '#64748b', fontSize: '0.9rem' }}>
+                現在地から10km以内の取扱店を読み込み中…
+              </div>
+            )}
+
+            {viewMode === 'handling' && handlingError && (
+              <div style={{ marginBottom: '1rem', color: '#ef4444', fontSize: '0.9rem' }}>{handlingError}</div>
+            )}
+
+            {/* ✅ 近隣通知（買えた報告のみ） */}
+            {viewMode === 'nearby' && stores.length > 0 && productId !== null && selectedCandidate && userPos && (
+              <div style={{ marginBottom: '1rem' }}>
+                <WatchNotifyBar productId={productId} productName={selectedCandidate.name} lat={userPos.lat} lng={userPos.lng} />
+              </div>
+            )}
+
+            {shownStores.length === 0 && !loading && !error && !handlingLoading && (
               <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280', backgroundColor: '#fff', borderRadius: 16 }}>
-                <p>{notice ?? `半径${RADIUS_KM}km以内にデータが見つかりませんでした。`}</p>
+                <p>{emptyMessage}</p>
               </div>
             )}
 
@@ -992,7 +1292,7 @@ setUserPos({ lat, lng });
                   name: displayName,
                 });
 
-                const isHighRisk = highRiskStoreIds.includes(String(store.id));
+                const isHighRisk = viewMode === 'nearby' && highRiskStoreIds.includes(String(store.id));
 
                 return (
                   <li
@@ -1016,8 +1316,10 @@ setUserPos({ lat, lng });
                       </div>
                     )}
 
-                    {renderScoreCompact(store)}
-                    {renderCommunityCompact(store)}
+                    <>
+                      {renderFreshStatusCompact(store)}
+                      {viewMode === 'nearby' ? renderCommunityCompact(store) : null}
+                    </>
 
                     <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid #f1f5f9', fontSize: '0.9rem' }}>
                       <div style={{ marginBottom: '0.4rem' }}>
@@ -1091,34 +1393,34 @@ setUserPos({ lat, lng });
         <div style={{ marginTop: '1.6rem', textAlign: 'center' }}>
           <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>エリア別の店舗情報</div>
 
-<Link
-  href="/areas"
-  prefetch={false}
-  onClick={() =>
-    sendGAEvent('event', 'area_pages_click', {
-      placement: 'below_search_results',
-    })
-  }
-  style={{
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    padding: '0.75rem 1.1rem',
-    borderRadius: 999,
-    border: '1px solid #bfdbfe',
-    backgroundColor: '#eff6ff',
-    color: '#1d4ed8',
-    textDecoration: 'underline',
-    textUnderlineOffset: 2,
-    fontSize: '0.95rem',
-    fontWeight: 800,
-    boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
-    cursor: 'pointer',
-  }}
->
-  エリア別店舗情報はこちら
-</Link>
+          <Link
+            href="/areas"
+            prefetch={false}
+            onClick={() =>
+              sendGAEvent('event', 'area_pages_click', {
+                placement: 'below_search_results',
+              })
+            }
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              padding: '0.75rem 1.1rem',
+              borderRadius: 999,
+              border: '1px solid #bfdbfe',
+              backgroundColor: '#eff6ff',
+              color: '#1d4ed8',
+              textDecoration: 'underline',
+              textUnderlineOffset: 2,
+              fontSize: '0.95rem',
+              fontWeight: 800,
+              boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
+              cursor: 'pointer',
+            }}
+          >
+            エリア別店舗情報はこちら
+          </Link>
 
           <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
             都道府県 → 市区町村 → 店舗詳細（買えた率/コメント）
