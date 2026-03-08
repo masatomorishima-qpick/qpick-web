@@ -1,12 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-
-import WatchNotifyBar from '@/components/WatchNotifyBar';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import StoreFeedback from '@/components/StoreFeedback';
-import { supabase } from '@/lib/supabaseClient';
 import { sendGAEvent } from '@next/third-parties/google';
+
+import StoreFeedback from '@/components/StoreFeedback';
+import WatchNotifyBar from '@/components/WatchNotifyBar';
+import { supabase } from '@/lib/supabaseClient';
 
 type Candidate = {
   id: number;
@@ -99,9 +99,6 @@ type HandlingApiResponse = {
   stores: HandlingApiStore[];
 };
 
-const OWNER_FORM_URL =
-  'https://docs.google.com/forms/d/e/1FAIpQLSesiwtfNBHr1XByAE9_ObRyPJJlnqHvIg8Key1iuKDAg-A86A/viewform?usp=dialog';
-
 async function logProductRequest(keyword: string) {
   const trimmed = keyword.trim();
   if (!trimmed) return;
@@ -175,7 +172,9 @@ function calcScoreLabelRank(
   const total = foundCount + notFoundCount;
   if (total === 0) return { label: '—' as const, rank: 0 as const };
   if (notFoundCount >= 1 && foundCount === 0) return { label: '低' as const, rank: 1 as const };
-  if (foundCount >= 1 && lastStatus === 'found' && notFoundCount === 0) return { label: '高' as const, rank: 3 as const };
+  if (foundCount >= 1 && lastStatus === 'found' && notFoundCount === 0) {
+    return { label: '高' as const, rank: 3 as const };
+  }
   return { label: '中' as const, rank: 2 as const };
 }
 
@@ -184,6 +183,7 @@ function calcCommunityLabel(found: number, notFound: number) {
   const total = found + notFound;
   if (total === 0) return null;
   if (total < COMMUNITY_MIN_SAMPLES) return 'データ少';
+
   const foundRate = total > 0 ? found / total : null;
   if (foundRate !== null && foundRate >= 0.7) return '買えた多め';
   if (foundRate !== null && foundRate <= 0.3) return '売切れ多め';
@@ -191,8 +191,8 @@ function calcCommunityLabel(found: number, notFound: number) {
 }
 
 export default function HomePage() {
-  const RADIUS_KM = 5.0; // 既存の「近くの店舗」検索半径
-  const HANDLING_RADIUS_KM = 10; // 今回追加：取扱店ビューだけ 10km
+  const RADIUS_KM = 5.0;
+  const HANDLING_RADIUS_KM = 10;
   const HANDLING_TTL_HOURS = 168;
   const MIN_SUGGEST_CHARS = 2;
   const SUGGEST_DEBOUNCE_MS = 250;
@@ -200,15 +200,12 @@ export default function HomePage() {
   const [keyword, setKeyword] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // 近くの店舗（既存検索）
   const [stores, setStores] = useState<Store[]>([]);
 
-  // 取扱店（新機能）
   const [handlingStores, setHandlingStores] = useState<Store[]>([]);
   const [handlingAvailable, setHandlingAvailable] = useState(false);
   const [handlingLoading, setHandlingLoading] = useState(false);
   const [handlingError, setHandlingError] = useState<string | null>(null);
-  const [handlingFetched, setHandlingFetched] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -229,10 +226,9 @@ export default function HomePage() {
 
   const [requestSent, setRequestSent] = useState(false);
 
-  type ViewMode = 'nearby' | 'handling';
-  const [viewMode, setViewMode] = useState<ViewMode>('nearby');
-
   const trimmedKeyword = useMemo(() => keyword.trim(), [keyword]);
+  const isHandlingMode = handlingAvailable;
+  const shouldHideNearbyWhileCheckingHandling = handlingLoading && !handlingAvailable;
 
   const requestKey = useMemo(() => {
     if (!trimmedKeyword) return null;
@@ -259,7 +255,12 @@ export default function HomePage() {
     return `${(n / 1000).toFixed(1)}km`;
   };
 
-  const buildMapUrl = (params: { latitude?: unknown; longitude?: unknown; address?: unknown; name?: unknown }) => {
+  const buildMapUrl = (params: {
+    latitude?: unknown;
+    longitude?: unknown;
+    address?: unknown;
+    name?: unknown;
+  }) => {
     const lat = Number(params.latitude);
     const lng = Number(params.longitude);
     const name = typeof params.name === 'string' ? params.name.trim() : '';
@@ -325,7 +326,6 @@ export default function HomePage() {
     const foundCount = Number(row.found_count ?? 0);
     const notFoundCount = Number(row.not_found_count ?? 0);
     const lastStatus = row.last_status ?? null;
-
     const lastAnyAt = row.last_any_at ?? row.last_reported_at ?? null;
 
     const score = buildScoreFromCounts({
@@ -354,15 +354,17 @@ export default function HomePage() {
     };
   };
 
-  const fetchHandlingStores = async (pid: number, lat: number | null, lng: number | null) => {
+  const fetchHandlingStores = async (
+    pid: number,
+    lat: number | null,
+    lng: number | null
+  ): Promise<{ available: boolean; stores: Store[] }> => {
     setHandlingLoading(true);
     setHandlingError(null);
 
     try {
       if (lat == null || lng == null) {
-        throw new Error(
-          `取扱店ビューは現在地から${HANDLING_RADIUS_KM}km以内で絞り込むため、位置情報の取得が必要です。`
-        );
+        throw new Error('取扱店の表示には位置情報の取得が必要です。');
       }
 
       const params = new URLSearchParams({
@@ -378,16 +380,16 @@ export default function HomePage() {
       });
 
       if (res.status === 404) {
-        // handling_view = false
         setHandlingAvailable(false);
         setHandlingStores([]);
-        setHandlingFetched(true);
-        return;
+        return { available: false, stores: [] };
       }
 
       const json: unknown = await res.json().catch(() => ({}));
       const maybeError =
-        typeof json === 'object' && json !== null && 'error' in json ? (json as { error?: unknown }).error : undefined;
+        typeof json === 'object' && json !== null && 'error' in json
+          ? (json as { error?: unknown }).error
+          : undefined;
 
       if (!res.ok) {
         const msg = typeof maybeError === 'string' ? maybeError : '取扱店 API の呼び出しに失敗しました';
@@ -401,32 +403,18 @@ export default function HomePage() {
 
       setHandlingAvailable(true);
       setHandlingStores(mapped);
-      setHandlingFetched(true);
 
-      // 取扱店は基本「情報あり順」が自然
-      if (!userChangedSort) setSortMode('score');
+      return { available: true, stores: mapped };
     } catch (e: unknown) {
       setHandlingAvailable(false);
       setHandlingStores([]);
-      setHandlingFetched(true);
       setHandlingError(getErrorMessage(e) || '取扱店の取得に失敗しました。');
+      return { available: false, stores: [] };
     } finally {
       setHandlingLoading(false);
     }
   };
 
-  const ensureHandlingLoaded = async () => {
-    if (!productId) return;
-    if (handlingFetched || handlingLoading) return;
-
-    const lat = userPos?.lat ?? null;
-    const lng = userPos?.lng ?? null;
-    await fetchHandlingStores(productId, lat, lng);
-  };
-
-  // -----------------------------
-  // ✅ 投票成功イベントを受けて、店舗カードを即時更新（近くの店舗/取扱店 両方）
-  // -----------------------------
   useEffect(() => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<VoteSuccessDetail>).detail;
@@ -443,7 +431,6 @@ export default function HomePage() {
           const ttlHours = Number(s.score?.ttlHours ?? HANDLING_TTL_HOURS);
           const foundCount = Number(s.score?.foundCount ?? 0) + (detail.status === 'found' ? 1 : 0);
           const notFoundCount = Number(s.score?.notFoundCount ?? 0) + (detail.status === 'not_found' ? 1 : 0);
-          const lastStatus = detail.status;
 
           const nextScore = buildScoreFromCounts({
             ttlHours,
@@ -452,14 +439,14 @@ export default function HomePage() {
             lastFoundAt: detail.status === 'found' ? createdAt : (s.score?.lastFoundAt ?? null),
             lastNotFoundAt: detail.status === 'not_found' ? createdAt : (s.score?.lastNotFoundAt ?? null),
             lastAnyAt: createdAt,
-            lastStatus,
+            lastStatus: detail.status,
           });
 
-          // community（近くの店舗用）もあれば軽く更新
           const c = s.community ?? null;
           const cFound = Number(c?.found ?? 0) + (detail.status === 'found' ? 1 : 0);
           const cNotFound = Number(c?.notFound ?? 0) + (detail.status === 'not_found' ? 1 : 0);
           const cTotal = cFound + cNotFound;
+
           const nextCommunity: StoreCommunity | null = c
             ? {
                 ...c,
@@ -483,9 +470,6 @@ export default function HomePage() {
     return () => window.removeEventListener('qpick_vote_success', handler as EventListener);
   }, [productId]);
 
-  // -----------------------------
-  // 「みんなの結果（店舗別）」：最小表示
-  // -----------------------------
   const pillBase = {
     display: 'inline-flex',
     alignItems: 'center',
@@ -548,7 +532,6 @@ export default function HomePage() {
     );
   };
 
-  // ✅ 近くの店舗 / 取扱店 で表現を統一（報告ベース）
   const renderFreshStatusCompact = (store: Store) => {
     const s = store?.score;
 
@@ -564,7 +547,6 @@ export default function HomePage() {
       text = '買えた報告あり';
       badge = pill({ bg: '#ecfdf5', bd: '#bbf7d0', fg: '#166534' });
     } else if (notFound > 0) {
-      // not_found は煽らない
       text = '売り切れ報告あり';
       badge = pill({ bg: '#fff7ed', bd: '#fed7aa', fg: '#9a3412' });
     }
@@ -584,7 +566,6 @@ export default function HomePage() {
     );
   };
 
-  // サジェスト
   useEffect(() => {
     if (selectedCandidate) return;
 
@@ -615,7 +596,9 @@ export default function HomePage() {
         const json: unknown = await res.json().catch(() => ({}));
 
         const maybeError =
-          typeof json === 'object' && json !== null && 'error' in json ? (json as { error?: unknown }).error : undefined;
+          typeof json === 'object' && json !== null && 'error' in json
+            ? (json as { error?: unknown }).error
+            : undefined;
 
         const maybeCandidates =
           typeof json === 'object' && json !== null && 'candidates' in json
@@ -660,21 +643,18 @@ export default function HomePage() {
     setSelectedCandidate(c);
     setCandidates([]);
     setNotice(null);
-
     setKeyword(c.name);
 
     setStores([]);
     setHandlingStores([]);
     setHandlingAvailable(false);
     setHandlingError(null);
-    setHandlingFetched(false);
 
     setHighRiskStoreIds([]);
     setHasSearched(false);
     setProductId(null);
     setError(null);
 
-    setViewMode('nearby');
     setSortMode('distance');
     setUserChangedSort(false);
   };
@@ -689,21 +669,20 @@ export default function HomePage() {
     setHandlingStores([]);
     setHandlingAvailable(false);
     setHandlingError(null);
-    setHandlingFetched(false);
 
     setHighRiskStoreIds([]);
     setHasSearched(false);
     setNotice(null);
     setError(null);
 
-    setViewMode('nearby');
     setSortMode('distance');
     setUserChangedSort(false);
   };
 
   const shownStores = useMemo(() => {
-    return viewMode === 'handling' ? handlingStores : stores;
-  }, [viewMode, handlingStores, stores]);
+    if (shouldHideNearbyWhileCheckingHandling) return [];
+    return isHandlingMode ? handlingStores : stores;
+  }, [shouldHideNearbyWhileCheckingHandling, isHandlingMode, handlingStores, stores]);
 
   const sortedStores = useMemo(() => {
     const copy = [...shownStores];
@@ -730,15 +709,18 @@ export default function HomePage() {
       const bd = Number(b.distance_m ?? Number.POSITIVE_INFINITY);
       return ad - bd;
     });
+
     return copy;
   }, [shownStores, sortMode]);
 
   const emptyMessage = useMemo(() => {
-    if (viewMode === 'handling' && handlingAvailable) {
+    if (isHandlingMode) {
       return `現在地から${HANDLING_RADIUS_KM}km以内に取扱店が見つかりませんでした。`;
     }
     return notice ?? `半径${RADIUS_KM}km以内にデータが見つかりませんでした。`;
-  }, [viewMode, handlingAvailable, notice]);
+  }, [isHandlingMode, HANDLING_RADIUS_KM, notice, RADIUS_KM]);
+
+  const resultHeading = isHandlingMode ? '近くの取扱店舗' : '近くの店舗';
 
   const runSearch = async (c: Candidate) => {
     setLoading(true);
@@ -749,12 +731,9 @@ export default function HomePage() {
     setHandlingStores([]);
     setHandlingAvailable(false);
     setHandlingError(null);
-    setHandlingFetched(false);
 
     setHighRiskStoreIds([]);
     setHasSearched(false);
-
-    setViewMode('nearby');
 
     setUserChangedSort(false);
     setSortMode('distance');
@@ -781,7 +760,9 @@ export default function HomePage() {
       const json: unknown = await res.json().catch(() => ({}));
 
       const maybeError =
-        typeof json === 'object' && json !== null && 'error' in json ? (json as { error?: unknown }).error : undefined;
+        typeof json === 'object' && json !== null && 'error' in json
+          ? (json as { error?: unknown }).error
+          : undefined;
 
       if (!res.ok) {
         const msg = typeof maybeError === 'string' ? maybeError : '検索 API の呼び出しに失敗しました';
@@ -789,12 +770,17 @@ export default function HomePage() {
       }
 
       const storesFromApi =
-        typeof json === 'object' && json !== null && 'stores' in json && Array.isArray((json as { stores?: unknown }).stores)
+        typeof json === 'object' &&
+        json !== null &&
+        'stores' in json &&
+        Array.isArray((json as { stores?: unknown }).stores)
           ? ((json as { stores: unknown[] }).stores as Store[])
           : [];
 
       const apiProductId =
-        typeof json === 'object' && json !== null && 'productId' in json ? Number((json as { productId?: unknown }).productId) : NaN;
+        typeof json === 'object' && json !== null && 'productId' in json
+          ? Number((json as { productId?: unknown }).productId)
+          : NaN;
 
       const apiHighRisk =
         typeof json === 'object' &&
@@ -804,17 +790,31 @@ export default function HomePage() {
           ? ((json as { highRiskStoreIds: unknown[] }).highRiskStoreIds as string[])
           : [];
 
+      const pid = Number.isFinite(apiProductId) ? apiProductId : c.id;
+
+      setStores(storesFromApi);
+      setProductId(pid);
+      setHighRiskStoreIds(apiHighRisk);
+
+      const handlingResult = await fetchHandlingStores(pid, lat, lng);
+      const hasHandlingStores = handlingResult.available;
+
       let nextSort: SortMode = 'distance';
-      if (!userChangedSort) {
+      if (hasHandlingStores) {
+        nextSort = 'score';
+      } else if (!userChangedSort) {
         const hasScored = storesFromApi.some((s) => Number(s.score?.total ?? 0) > 0);
         const hasMidOrHigh = storesFromApi.some((s) => Number(s.score?.rank ?? 0) >= 2);
         if (hasScored && hasMidOrHigh) nextSort = 'score';
       }
+
       setSortMode(nextSort);
 
       try {
-        const ttlHours = Number(storesFromApi[0]?.score?.ttlHours ?? 6);
-        const counts = storesFromApi.reduce(
+        const renderTarget = hasHandlingStores ? handlingResult.stores : storesFromApi;
+        const ttlHours = Number(renderTarget[0]?.score?.ttlHours ?? (hasHandlingStores ? HANDLING_TTL_HOURS : 6));
+
+        const counts = renderTarget.reduce(
           (acc, s) => {
             const label = String(s.score?.label ?? '—');
             if (label === '高') acc.high += 1;
@@ -829,26 +829,19 @@ export default function HomePage() {
         sendGAEvent('event', 'score_rendered', {
           product_id: String(c.id),
           ttl_hours: String(ttlHours),
-          stores_total: String(storesFromApi.length),
-          scored_store_count: String(storesFromApi.length - counts.none),
+          stores_total: String(renderTarget.length),
+          scored_store_count: String(renderTarget.length - counts.none),
           score_high_count: String(counts.high),
           score_mid_count: String(counts.mid),
           score_low_count: String(counts.low),
           sort_mode: nextSort,
+          result_mode: hasHandlingStores ? 'handling' : 'nearby',
         });
       } catch {}
 
-      setStores(storesFromApi);
-      const pid = Number.isFinite(apiProductId) ? apiProductId : c.id;
-      setProductId(pid);
-      setHighRiskStoreIds(apiHighRisk);
       setHasSearched(true);
 
-      // 取扱店があるか“裏で”確認＆あればキャッシュ
-      // handling_view = false の商品なら 404 → handlingAvailable = false
-      void fetchHandlingStores(pid, lat, lng);
-
-      if (storesFromApi.length === 0) {
+      if (!hasHandlingStores && storesFromApi.length === 0) {
         setNotice(
           `現在地から${RADIUS_KM}km以内に店舗が見つかりませんでした。※現在、α版のため「東京エリア・大阪エリアのセブンイレブン・ファミリーマート・ローソン」が対象です。`
         );
@@ -872,7 +865,6 @@ export default function HomePage() {
       setHandlingStores([]);
       setHandlingAvailable(false);
       setHandlingError(null);
-      setHandlingFetched(false);
 
       setHighRiskStoreIds([]);
       setHasSearched(false);
@@ -959,10 +951,11 @@ export default function HomePage() {
             その商品、最寄りのコンビニにあるかも？
           </h1>
 
-          <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>みんなの目撃情報で無駄足回避</p>
+          <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>
+            みんなの目撃情報で無駄足回避
+          </p>
         </header>
 
-        {/* 1) 検索窓 */}
         <div
           style={{
             backgroundColor: '#ffffff',
@@ -981,13 +974,13 @@ export default function HomePage() {
                 onChange={(e) => {
                   const v = e.target.value;
                   setKeyword(v);
+
                   if (selectedCandidate) setSelectedCandidate(null);
 
                   setStores([]);
                   setHandlingStores([]);
                   setHandlingAvailable(false);
                   setHandlingError(null);
-                  setHandlingFetched(false);
 
                   setHighRiskStoreIds([]);
                   setHasSearched(false);
@@ -995,7 +988,6 @@ export default function HomePage() {
                   setError(null);
                   setNotice(null);
 
-                  setViewMode('nearby');
                   setSortMode('distance');
                   setUserChangedSort(false);
                 }}
@@ -1010,8 +1002,12 @@ export default function HomePage() {
                   transition: 'box-shadow 0.2s',
                   backgroundColor: '#f8fafc',
                 }}
-                onFocus={(e) => (e.currentTarget.style.boxShadow = '0 0 0 3px rgba(37, 99, 235, 0.2)')}
-                onBlur={(e) => (e.currentTarget.style.boxShadow = 'none')}
+                onFocus={(e) => {
+                  e.currentTarget.style.boxShadow = '0 0 0 3px rgba(37, 99, 235, 0.2)';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
               />
             </div>
 
@@ -1023,7 +1019,9 @@ export default function HomePage() {
             )}
 
             {suggestLoading && (
-              <p style={{ color: '#9ca3af', fontSize: '0.9rem', margin: 0, paddingLeft: '0.8rem' }}>候補を検索中…</p>
+              <p style={{ color: '#9ca3af', fontSize: '0.9rem', margin: 0, paddingLeft: '0.8rem' }}>
+                候補を検索中…
+              </p>
             )}
 
             {!selectedCandidate && candidates.length > 0 && (
@@ -1031,6 +1029,7 @@ export default function HomePage() {
                 <p style={{ fontSize: '0.85rem', color: '#6b7280', margin: '0 0 0.25rem 0.5rem' }}>
                   候補から選択してください
                 </p>
+
                 {candidates.map((c) => (
                   <button
                     key={c.id}
@@ -1045,8 +1044,12 @@ export default function HomePage() {
                       cursor: 'pointer',
                       transition: 'background-color 0.2s',
                     }}
-                    onMouseOver={(e) => (e.currentTarget.style.backgroundColor = '#e2e8f0')}
-                    onMouseOut={(e) => (e.currentTarget.style.backgroundColor = '#f1f5f9')}
+                    onMouseOver={(e) => {
+                      e.currentTarget.style.backgroundColor = '#e2e8f0';
+                    }}
+                    onMouseOut={(e) => {
+                      e.currentTarget.style.backgroundColor = '#f1f5f9';
+                    }}
                   >
                     <div style={{ fontWeight: 600, color: '#1e293b' }}>{c.name}</div>
                     {c.category && <div style={{ fontSize: '0.8rem', color: '#64748b' }}>{c.category}</div>}
@@ -1096,6 +1099,7 @@ export default function HomePage() {
                     <span style={{ fontSize: '0.8rem', color: '#1e40af', display: 'block' }}>選択中</span>
                     <span style={{ fontWeight: 700, color: '#1e3a8a' }}>{selectedCandidate.name}</span>
                   </div>
+
                   <button
                     type="button"
                     onClick={clearSelection}
@@ -1129,8 +1133,9 @@ export default function HomePage() {
                     transition: 'all 0.2s',
                   }}
                 >
-                  {loading ? '現在地周辺を探しています…' : '近くの店舗を検索'}
+                  {loading ? '現在地周辺を探しています…' : '近くで探す'}
                 </button>
+
                 <p style={{ textAlign: 'center', fontSize: '0.75rem', color: '#9ca3af', marginTop: '0.5rem' }}>
                   ※位置情報の許可が必要です
                 </p>
@@ -1139,12 +1144,11 @@ export default function HomePage() {
           </form>
         </div>
 
-        {/* 2) 検索結果 */}
         {(hasSearched || loading) && (
           <section style={{ marginTop: '2rem' }}>
             <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12 }}>
               <h2 style={{ fontSize: '1.1rem', fontWeight: 800, marginBottom: '1rem', color: '#334155' }}>
-                検索結果
+                {resultHeading}
                 {shownStores.length > 0 && (
                   <span style={{ fontSize: '0.9rem', fontWeight: 400, marginLeft: '0.5rem', color: '#64748b' }}>
                     {shownStores.length}件
@@ -1185,104 +1189,92 @@ export default function HomePage() {
               )}
             </div>
 
-            {/* ✅ 限定商品：表示切替（取扱店ビュー） */}
-            {handlingAvailable && (
-              <div style={{ display: 'flex', gap: 8, marginBottom: '0.75rem' }}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setViewMode('nearby');
-                    if (!userChangedSort) setSortMode('distance');
-                    sendGAEvent('event', 'view_mode_changed', { mode: 'nearby' });
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: '0.7rem 0.9rem',
-                    borderRadius: 12,
-                    border: viewMode === 'nearby' ? '2px solid #2563eb' : '1px solid #cbd5e1',
-                    backgroundColor: viewMode === 'nearby' ? '#eff6ff' : '#ffffff',
-                    color: '#0f172a',
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                  }}
-                >
-                  近くの店舗
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setViewMode('handling');
-                    if (!userChangedSort) setSortMode('score');
-                    sendGAEvent('event', 'view_mode_changed', { mode: 'handling' });
-                    await ensureHandlingLoaded();
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: '0.7rem 0.9rem',
-                    borderRadius: 12,
-                    border: viewMode === 'handling' ? '2px solid #2563eb' : '1px solid #cbd5e1',
-                    backgroundColor: viewMode === 'handling' ? '#eff6ff' : '#ffffff',
-                    color: '#0f172a',
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                  }}
-                >
-                  取扱店
-                </button>
-              </div>
-            )}
-
-            {viewMode === 'handling' && handlingAvailable && (
+            {loading && (
               <div
                 style={{
                   marginBottom: '1rem',
+                  color: '#64748b',
+                  fontSize: '0.9rem',
                   backgroundColor: '#ffffff',
                   border: '1px solid #e2e8f0',
                   borderRadius: 14,
-                  padding: '0.85rem 0.95rem',
-                  color: '#475569',
-                  fontSize: '0.9rem',
-                  lineHeight: 1.5,
+                  padding: '0.9rem 1rem',
                 }}
               >
-                <div style={{ fontWeight: 800, color: '#0f172a', marginBottom: 4 }}>現在地から10km以内の取扱店を表示しています</div>
-                <div>
-                  取扱店リストをもとに絞り込んでいます。実際の在庫状況は店舗により異なるため、「買えた報告あり」「売り切れ報告あり」「報告なし」を参考にしてください。
-                </div>
+                現在地周辺の店舗情報を読み込み中…
               </div>
             )}
 
-            {viewMode === 'handling' && handlingLoading && (
-              <div style={{ marginBottom: '1rem', color: '#64748b', fontSize: '0.9rem' }}>
-                現在地から10km以内の取扱店を読み込み中…
+            {shouldHideNearbyWhileCheckingHandling && !loading && (
+              <div
+                style={{
+                  marginBottom: '1rem',
+                  color: '#64748b',
+                  fontSize: '0.9rem',
+                  backgroundColor: '#ffffff',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 14,
+                  padding: '0.9rem 1rem',
+                }}
+              >
+                取扱店データを確認中…
               </div>
             )}
 
-            {viewMode === 'handling' && handlingError && (
-              <div style={{ marginBottom: '1rem', color: '#ef4444', fontSize: '0.9rem' }}>{handlingError}</div>
+            {isHandlingMode && !loading && (
+  <div
+    style={{
+      marginBottom: '1rem',
+      fontSize: '0.85rem',
+      color: '#64748b',
+    }}
+  >
+    ※現在地から10km以内の取扱店を表示
+  </div>
             )}
 
-            {/* ✅ 近隣通知（買えた報告のみ） */}
-            {viewMode === 'nearby' && stores.length > 0 && productId !== null && selectedCandidate && userPos && (
+            {handlingError && !isHandlingMode && !loading && (
+              <div style={{ marginBottom: '1rem', color: '#ef4444', fontSize: '0.9rem' }}>
+                取扱店の確認に失敗したため、近くの店舗を表示しています。
+              </div>
+            )}
+
+            {!isHandlingMode && stores.length > 0 && productId !== null && selectedCandidate && userPos && (
               <div style={{ marginBottom: '1rem' }}>
-                <WatchNotifyBar productId={productId} productName={selectedCandidate.name} lat={userPos.lat} lng={userPos.lng} />
+                <WatchNotifyBar
+                  productId={productId}
+                  productName={selectedCandidate.name}
+                  lat={userPos.lat}
+                  lng={userPos.lng}
+                />
               </div>
             )}
 
-            {shownStores.length === 0 && !loading && !error && !handlingLoading && (
-              <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280', backgroundColor: '#fff', borderRadius: 16 }}>
+            {shownStores.length === 0 && !loading && !error && !shouldHideNearbyWhileCheckingHandling && (
+              <div
+                style={{
+                  textAlign: 'center',
+                  padding: '2rem',
+                  color: '#6b7280',
+                  backgroundColor: '#fff',
+                  borderRadius: 16,
+                }}
+              >
                 <p>{emptyMessage}</p>
               </div>
             )}
 
             <ul style={{ display: 'grid', gap: '1rem', listStyle: 'none', padding: 0, margin: 0 }}>
               {sortedStores.map((store, index) => {
-                const displayName = pickFirstNonEmptyString([store.name, store.store_name, store.shop_name]) ?? '店舗名';
+                const displayName =
+                  pickFirstNonEmptyString([store.name, store.store_name, store.shop_name]) ?? '店舗名';
 
-                const displayAddressRaw = pickFirstNonEmptyString([store.address, store.full_address, store.road_address]) ?? '';
+                const displayAddressRaw =
+                  pickFirstNonEmptyString([store.address, store.full_address, store.road_address]) ?? '';
                 const displayAddress = stripPostalCode(displayAddressRaw);
 
-                const displayPhone = pickFirstNonEmptyString([store.phone, store.tel, store.telephone]) ?? '';
+                const displayPhone =
+                  pickFirstNonEmptyString([store.phone, store.tel, store.telephone]) ?? '';
                 const phoneDigits = displayPhone ? normalizePhoneForTel(displayPhone) : null;
 
                 const mapUrl = buildMapUrl({
@@ -1292,7 +1284,7 @@ export default function HomePage() {
                   name: displayName,
                 });
 
-                const isHighRisk = viewMode === 'nearby' && highRiskStoreIds.includes(String(store.id));
+                const isHighRisk = !isHandlingMode && highRiskStoreIds.includes(String(store.id));
 
                 return (
                   <li
@@ -1305,9 +1297,21 @@ export default function HomePage() {
                       boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.05)',
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: '0.5rem' }}>
-                      <div style={{ fontWeight: 700, fontSize: '1.05rem', color: '#1e293b' }}>{displayName}</div>
-                      {isHighRisk && <span style={pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })}>要注意</span>}
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                        marginBottom: '0.5rem',
+                      }}
+                    >
+                      <div style={{ fontWeight: 700, fontSize: '1.05rem', color: '#1e293b' }}>
+                        {displayName}
+                      </div>
+                      {isHighRisk && (
+                        <span style={pill({ bg: '#fef2f2', bd: '#fecaca', fg: '#991b1b' })}>要注意</span>
+                      )}
                     </div>
 
                     {store.distance_m != null && (
@@ -1318,10 +1322,17 @@ export default function HomePage() {
 
                     <>
                       {renderFreshStatusCompact(store)}
-                      {viewMode === 'nearby' ? renderCommunityCompact(store) : null}
+                      {!isHandlingMode ? renderCommunityCompact(store) : null}
                     </>
 
-                    <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid #f1f5f9', fontSize: '0.9rem' }}>
+                    <div
+                      style={{
+                        marginTop: '1rem',
+                        paddingTop: '1rem',
+                        borderTop: '1px solid #f1f5f9',
+                        fontSize: '0.9rem',
+                      }}
+                    >
                       <div style={{ marginBottom: '0.4rem' }}>
                         {mapUrl ? (
                           <a
@@ -1379,7 +1390,11 @@ export default function HomePage() {
 
                     {productId !== null && (
                       <div style={{ marginTop: '1rem' }}>
-                        <StoreFeedback storeId={String(store.id)} storeName={displayName} productId={productId} />
+                        <StoreFeedback
+                          storeId={String(store.id)}
+                          storeName={displayName}
+                          productId={productId}
+                        />
                       </div>
                     )}
                   </li>
@@ -1389,9 +1404,10 @@ export default function HomePage() {
           </section>
         )}
 
-        {/* 3) エリア別店舗情報 */}
         <div style={{ marginTop: '1.6rem', textAlign: 'center' }}>
-          <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>エリア別の店舗情報</div>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>
+            エリア別の店舗情報
+          </div>
 
           <Link
             href="/areas"
@@ -1424,59 +1440,6 @@ export default function HomePage() {
 
           <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
             都道府県 → 市区町村 → 店舗詳細（買えた率/コメント）
-          </div>
-        </div>
-
-        {/* 4) 在庫連携はこちら */}
-        <div style={{ marginTop: '1.6rem', textAlign: 'center' }}>
-          <div
-            style={{
-              height: 1,
-              backgroundColor: '#e2e8f0',
-              margin: '0 auto 1rem',
-              width: '70%',
-              borderRadius: 999,
-            }}
-          />
-
-          <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' }}>店舗様向け</div>
-
-          <a
-            href={OWNER_FORM_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={() =>
-              sendGAEvent('event', 'owner_form_click', {
-                placement: 'below_search_results',
-              })
-            }
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              padding: '0.75rem 1.1rem',
-              borderRadius: 999,
-              border: '1px solid #fdba74',
-              backgroundColor: '#fff7ed',
-              color: '#9a3412',
-              textDecoration: 'none',
-              fontSize: '0.95rem',
-              fontWeight: 800,
-              boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
-            }}
-            onMouseOver={(e) => {
-              e.currentTarget.style.backgroundColor = '#ffedd5';
-            }}
-            onMouseOut={(e) => {
-              e.currentTarget.style.backgroundColor = '#fff7ed';
-            }}
-          >
-            在庫連携はこちら
-          </a>
-
-          <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: '#94a3b8' }}>
-            無料トライアル実施中。店舗名・住所公開が参加条件です。
           </div>
         </div>
       </div>
