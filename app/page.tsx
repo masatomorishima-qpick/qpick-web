@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { sendGAEvent } from '@next/third-parties/google';
 
 import StoreFeedback from '@/components/StoreFeedback';
@@ -191,7 +191,7 @@ function calcCommunityLabel(found: number, notFound: number) {
   return null;
 }
 
-export default function HomePage() {
+function HomePageContent() {
   const searchParams = useSearchParams();
   const deepLinkHandledRef = useRef<string | null>(null);
 
@@ -1488,5 +1488,42 @@ export default function HomePage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense
+      fallback={
+        <main
+          style={{
+            minHeight: '100vh',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            padding: '2rem 1rem',
+            backgroundColor: '#f8fafc',
+          }}
+        >
+          <div style={{ width: '100%', maxWidth: 600 }}>
+            <div
+              style={{
+                backgroundColor: '#ffffff',
+                borderRadius: 24,
+                padding: '1.5rem',
+                boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)',
+                border: '1px solid #f1f5f9',
+                color: '#64748b',
+                textAlign: 'center',
+              }}
+            >
+              読み込み中…
+            </div>
+          </div>
+        </main>
+      }
+    >
+      <HomePageContent />
+    </Suspense>
   );
 }
