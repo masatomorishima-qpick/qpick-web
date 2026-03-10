@@ -991,7 +991,7 @@ export default function HomePage() {
                   setSortMode('distance');
                   setUserChangedSort(false);
                 }}
-                placeholder="商品名の一部を入力（例：ちいかわ）"
+                placeholder="商品名の一部を入力"
                 style={{
                   width: '100%',
                   padding: '1rem 1.2rem',
