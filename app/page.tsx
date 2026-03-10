@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { sendGAEvent } from '@next/third-parties/google';
 
 import StoreFeedback from '@/components/StoreFeedback';
@@ -191,6 +192,9 @@ function calcCommunityLabel(found: number, notFound: number) {
 }
 
 export default function HomePage() {
+  const searchParams = useSearchParams();
+  const deepLinkHandledRef = useRef<string | null>(null);
+
   const RADIUS_KM = 5.0;
   const HANDLING_RADIUS_KM = 10;
   const HANDLING_TTL_HOURS = 168;
@@ -874,6 +878,46 @@ export default function HomePage() {
     }
   };
 
+  useEffect(() => {
+    const pidRaw = searchParams.get('productId');
+    const keywordRaw = searchParams.get('keyword');
+
+    if (!pidRaw || !keywordRaw) return;
+
+    const pid = Number(pidRaw);
+    const name = keywordRaw.trim();
+
+    if (!Number.isFinite(pid) || !name) return;
+
+    const deepLinkKey = `${pid}:${name}`;
+    if (deepLinkHandledRef.current === deepLinkKey) return;
+    deepLinkHandledRef.current = deepLinkKey;
+
+    const candidate: Candidate = { id: pid, name };
+
+    setKeyword(name);
+    setSelectedCandidate(candidate);
+    setCandidates([]);
+    setSuggestLoading(false);
+
+    setStores([]);
+    setHandlingStores([]);
+    setHandlingAvailable(false);
+    setHandlingError(null);
+
+    setHighRiskStoreIds([]);
+    setHasSearched(false);
+    setProductId(pid);
+    setError(null);
+    setNotice(null);
+    setUserPos(null);
+
+    setSortMode('distance');
+    setUserChangedSort(false);
+
+    void runSearch(candidate);
+  }, [searchParams]);
+
   const canSearch = !!selectedCandidate && !loading;
 
   const handleSubmit = async (e: FormEvent) => {
@@ -1222,15 +1266,15 @@ export default function HomePage() {
             )}
 
             {isHandlingMode && !loading && (
-  <div
-    style={{
-      marginBottom: '1rem',
-      fontSize: '0.85rem',
-      color: '#64748b',
-    }}
-  >
-    ※現在地から10km以内の取扱店を表示
-  </div>
+              <div
+                style={{
+                  marginBottom: '1rem',
+                  fontSize: '0.85rem',
+                  color: '#64748b',
+                }}
+              >
+                ※現在地から10km以内の取扱店を表示
+              </div>
             )}
 
             {handlingError && !isHandlingMode && !loading && (

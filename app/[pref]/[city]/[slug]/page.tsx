@@ -10,9 +10,6 @@ export const revalidate = 300;
 
 type Params = Promise<{ pref: string; city: string; slug: string }>;
 
-const OWNER_FORM_URL =
-  'https://docs.google.com/forms/d/e/1FAIpQLSesiwtfNBHr1XByAE9_ObRyPJJlnqHvIg8Key1iuKDAg-A86A/viewform?usp=dialog';
-
 type StoreRow = {
   id: string;
   chain: string | null;
@@ -60,6 +57,15 @@ type TopKeywordRow = {
 type ProductRow = {
   id: number | null;
   name: string | null;
+};
+
+type HandlingStoreRow = {
+  product_id: number | null;
+};
+
+type HandlingProductItem = {
+  id: number;
+  name: string;
 };
 
 type NearbyRpcRow = {
@@ -147,7 +153,7 @@ export async function generateMetadata({ params }: { params: Params }) {
 
   return {
     title: `${prefName}${city} ${storeName}｜コンビニの在庫共有サービスQpick`,
-    description: `${prefName}${city}の${storeName}の店舗詳細。直近の「買えた率」、商品別の買えた率、コメント、エリアの検索上位、近隣店舗を確認できます。`,
+    description: `${prefName}${city}の${storeName}の店舗詳細。直近の「買えた率」、商品別の買えた率、コメント、エリアの検索上位、近隣店舗、取扱商品を確認できます。`,
     alternates: {
       canonical: `/${encodeURIComponent(prefSlug)}/${encodeURIComponent(city)}/${encodeURIComponent(slug)}`,
     },
@@ -177,7 +183,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
   const storeError = storeRes.error;
   const storeRaw = (storeRes.data ?? null) as unknown as StoreRow | null;
 
-  // ★ここ：return notFound() ではなく notFound() を呼ぶ（throw）
   if (storeError || !storeRaw) notFound();
 
   const store = storeRaw;
@@ -196,8 +201,8 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
   const address = store.address ?? '';
   const mapUrl = buildMapUrl(storeName, address);
 
-  // ✅ ここから下は独立した取得が多いので並列化（体感改善）
-  const [overallRes, prodStatsRes, fbRes, topKwRes] = await Promise.all([
+  // ✅ ここから下は独立した取得が多いので並列化
+  const [overallRes, prodStatsRes, fbRes, topKwRes, handlingRes] = await Promise.all([
     supabase.rpc('store_overall_stats', {
       in_store_id: store.id,
       in_days: DAYS,
@@ -219,6 +224,7 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
       in_days: DAYS,
       in_limit: 10,
     }),
+    supabase.from('product_handling_stores').select('product_id').eq('store_id', store.id),
   ]);
 
   const overallArr = overallRes.data as unknown;
@@ -244,14 +250,24 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
   const topKwRaw = topKwRes.data as unknown;
   const topKeywords: TopKeywordRow[] = Array.isArray(topKwRaw) ? (topKwRaw as unknown as TopKeywordRow[]) : [];
 
-  // コメントに紐づく商品名
-  const productIds = Array.from(
+  const handlingRaw = handlingRes.data as unknown;
+  const handlingRows: HandlingStoreRow[] = Array.isArray(handlingRaw)
+    ? (handlingRaw as unknown as HandlingStoreRow[])
+    : [];
+
+  const handlingProductIds = Array.from(
+    new Set(handlingRows.map((r) => Number(r.product_id)).filter((n) => Number.isFinite(n)))
+  );
+
+  const feedbackProductIds = Array.from(
     new Set(feedback.map((r) => Number(r.product_id)).filter((n) => Number.isFinite(n)))
   );
+
+  const allProductIds = Array.from(new Set([...handlingProductIds, ...feedbackProductIds]));
   const productNameById = new Map<number, string>();
 
-  if (productIds.length > 0) {
-    const { data: productsRaw } = await supabase.from('products').select('id, name').in('id', productIds);
+  if (allProductIds.length > 0) {
+    const { data: productsRaw } = await supabase.from('products').select('id, name').in('id', allProductIds);
     const products = (productsRaw ?? []) as unknown as ProductRow[];
     for (const p of products) {
       const id = Number(p.id);
@@ -259,6 +275,14 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
       productNameById.set(id, String(p.name ?? ''));
     }
   }
+
+  const handlingProducts: HandlingProductItem[] = handlingProductIds
+    .map((id) => ({
+      id,
+      name: productNameById.get(id) ?? '',
+    }))
+    .filter((p): p is HandlingProductItem => Boolean(p.name))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ja'));
 
   // 近隣店舗（距離順）
   let nearStores: NearStoreItem[] = [];
@@ -355,7 +379,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
   return (
     <main style={{ maxWidth: 980, margin: '0 auto', padding: '24px 16px' }}>
       <nav style={{ fontSize: 14, color: '#64748b' }}>
-        {/* ✅ 内部Linkは prefetch を止める（?_rsc の先読み爆発を防ぐ） */}
         <Link href="/" prefetch={false} style={breadcrumbLink}>
           Home
         </Link>{' '}
@@ -396,6 +419,27 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
           </div>
           <div>電話：{store.phone ?? '-'}</div>
         </div>
+      </section>
+
+      <section style={{ marginTop: 14, ...card }}>
+        <h2 style={{ fontSize: 18, margin: '0 0 8px 0' }}>この店舗の取扱商品</h2>
+        {handlingProducts.length === 0 ? (
+          <div style={{ color: '#475569' }}>この店舗に紐づく取扱商品はまだ登録されていません。</div>
+        ) : (
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {handlingProducts.map((p) => (
+              <li key={p.id} style={{ margin: '8px 0' }}>
+                <Link
+                  href={`/?productId=${p.id}&keyword=${encodeURIComponent(p.name)}`}
+                  prefetch={false}
+                  style={linkStyle}
+                >
+                  {p.name}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section style={{ marginTop: 14, ...card }}>
@@ -517,19 +561,6 @@ export default async function StoreDetailPage({ params }: { params: Params }) {
             ))}
           </ul>
         )}
-      </section>
-
-      <section style={{ marginTop: 14, ...card }}>
-        <h2 style={{ fontSize: 18, margin: '0 0 8px 0' }}>店舗様向け：在庫連携</h2>
-        <p style={{ margin: 0, color: '#475569', lineHeight: 1.8 }}>
-          Qpickでは、店舗の在庫情報（買えた／買えなかった）を共有し、近隣ユーザーの来店機会に繋げます。
-          連携に興味があれば、以下フォームからご連絡ください。
-        </p>
-        <p style={{ marginTop: 10 }}>
-          <a href={OWNER_FORM_URL} target="_blank" rel="noopener noreferrer" style={linkStyle}>
-            在庫連携はこちら（無料トライアル）
-          </a>
-        </p>
       </section>
     </main>
   );
