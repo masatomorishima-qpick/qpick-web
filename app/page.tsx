@@ -953,6 +953,105 @@ function HomePageContent() {
     }
   };
 
+  // ★ 新規追加：注目のくじをクリックした時の処理
+  const handleFeaturedClick = (itemName: string) => {
+    setKeyword(itemName);
+    if (selectedCandidate) setSelectedCandidate(null);
+    
+    setStores([]);
+    setHandlingStores([]);
+    setHandlingAvailable(false);
+    setHandlingError(null);
+    setHighRiskStoreIds([]);
+    setHasSearched(false);
+    setProductId(null);
+    setError(null);
+    setNotice(null);
+    setSortMode('distance');
+    setUserChangedSort(false);
+    
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // ★ 新規追加：注目のくじ一覧（表示用データ）
+  const FEATURED_ITEMS = ['ポケモンカード', '一番くじ 呪術廻戦', '一番くじ ワンピース', '一番くじ ドラゴンボール'];
+
+  // ★ 新規追加：最新の報告タイムライン（※まずはデザイン確認用のサンプルデータ）
+  // ★ タイムライン用の状態（ステート）を準備
+  const [timeline, setTimeline] = useState<{
+    id: string;
+    store: string;
+    item: string;
+    status: string;
+    time: string;
+    color: string;
+    bg: string;
+  }[]>([]);
+
+// ★ ページが開かれた時にSupabaseから最新の投稿を5件取得する
+  useEffect(() => {
+    async function loadTimeline() {
+      try {
+        // 1. まず、投稿データ（store_product_flags）を最新順で取得
+        const { data: flags, error: flagsError } = await supabase
+          .from('store_product_flags')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(5);
+
+        if (flagsError) throw flagsError;
+
+        if (flags && flags.length > 0) {
+          // 2. 取得した投稿の store_id と product_id をまとめる
+          const storeIds = [...new Set(flags.map(f => f.store_id))];
+          const productIds = [...new Set(flags.map(f => f.product_id))];
+
+          // 3. 必要な店舗情報を取得（※エラーの原因だった列名を「id, name」だけに修正）
+          const { data: storesData, error: storesError } = await supabase
+            .from('stores')
+            .select('id, name')
+            .in('id', storeIds);
+            
+          if (storesError) console.error('店舗エラー:', storesError);
+
+          // 4. 必要な商品情報を取得
+          const { data: productsData, error: productsError } = await supabase
+            .from('products')
+            .select('id, name')
+            .in('id', productIds);
+            
+          if (productsError) console.error('商品エラー:', productsError);
+
+          // 5. データを結合して表示用の形に整形する
+          const formatted = flags.map((flag, index) => {
+            const store = storesData?.find(s => s.id === flag.store_id);
+            const product = productsData?.find(p => p.id === flag.product_id);
+
+            // ここもシンプルに store.name だけを参照するように変更
+            const storeName = store?.name || '店舗名不明';
+            const productName = product?.name || '商品名不明';
+            const isFound = flag.status === 'found';
+
+            return {
+              id: `${flag.store_id}-${flag.product_id}-${index}`,
+              store: storeName,
+              item: productName,
+              status: isFound ? '買えた' : '売切れ',
+              time: formatTimeAgo(flag.created_at),
+              color: isFound ? '#166534' : '#991b1b',
+              bg: isFound ? '#ecfdf5' : '#fef2f2',
+            };
+          });
+
+          setTimeline(formatted);
+        }
+      } catch (err) {
+        console.error('タイムライン取得エラー:', err);
+      }
+    }
+    loadTimeline();
+  }, []);
+
   return (
     <main
       style={{
@@ -992,11 +1091,11 @@ function HomePageContent() {
           </div>
 
           <h1 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#111827', margin: 0, lineHeight: 1.4 }}>
-            その商品、最寄りのコンビニにあるかも？
+            一番くじ・限定品、最寄りのコンビニにあるかも？
           </h1>
 
           <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>
-            みんなの目撃情報で無駄足回避
+            みんなの目撃情報で「売ってない！」の絶望を回避
           </p>
         </header>
 
@@ -1187,6 +1286,90 @@ function HomePageContent() {
             )}
           </form>
         </div>
+
+        {/* ★ 新規追加：検索前の画面にだけ表示される「注目のくじ」と「タイムライン」 */}
+        {!hasSearched && !loading && (
+          <div style={{ marginTop: '2rem', animation: 'fadeIn 0.3s ease-in' }}>
+            
+            {/* 注目のくじセクション */}
+            <div style={{ marginBottom: '2rem' }}>
+              <h2 style={{ fontSize: '1rem', fontWeight: 800, color: '#334155', marginBottom: '1rem' }}>
+                🔥 今、注目のくじ・限定品
+              </h2>
+              {/* 横スクロール対応のコンテナ */}
+              <div style={{ display: 'flex', gap: '0.75rem', overflowX: 'auto', paddingBottom: '0.5rem', scrollbarWidth: 'none' }}>
+                {FEATURED_ITEMS.map(item => (
+                  <button
+                    key={item}
+                    onClick={() => handleFeaturedClick(item)}
+                    style={{
+                      flexShrink: 0, 
+                      padding: '0.75rem 1rem', 
+                      backgroundColor: '#fff', 
+                      border: '2px solid #e2e8f0',
+                      borderRadius: 12, 
+                      fontSize: '0.9rem', 
+                      fontWeight: 700, 
+                      color: '#1e293b', 
+                      cursor: 'pointer',
+                      boxShadow: '0 2px 4px rgba(0,0,0,0.02)',
+                      transition: 'border-color 0.2s'
+                    }}
+                    onMouseOver={(e) => e.currentTarget.style.borderColor = '#93c5fd'}
+                    onMouseOut={(e) => e.currentTarget.style.borderColor = '#e2e8f0'}
+                  >
+                    {item}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 最新の報告タイムラインセクション */}
+            <div>
+              <h2 style={{ fontSize: '1rem', fontWeight: 800, color: '#334155', marginBottom: '1rem' }}>
+                ⚡ 最新の在庫報告（リアルタイム）
+              </h2>
+              <div style={{ display: 'grid', gap: '0.75rem' }}>
+                {timeline.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '1rem', color: '#64748b', fontSize: '0.9rem' }}>
+                    最新の報告を読み込み中、またはまだ報告がありません。
+                  </div>
+                ) : (
+                  timeline.map(t => (
+                    <div
+                      key={t.id}
+                      onClick={() => handleFeaturedClick(t.item)}
+                      style={{
+                        backgroundColor: '#fff',
+                        padding: '1rem',
+                        borderRadius: 16,
+                        border: '1px solid #e2e8f0',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.02)',
+                        cursor: 'pointer',
+                        transition: 'border-color 0.2s'
+                      }}
+                      onMouseOver={(e) => e.currentTarget.style.borderColor = '#93c5fd'}
+                      onMouseOut={(e) => e.currentTarget.style.borderColor = '#e2e8f0'}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
+                        <span style={{ fontSize: '0.75rem', color: '#64748b' }}>{t.time}</span>
+                        <span style={{ fontSize: '0.75rem', fontWeight: 700, color: t.color, backgroundColor: t.bg, padding: '0.1rem 0.5rem', borderRadius: 999 }}>{t.status}</span>
+                      </div>
+                      <div style={{ fontWeight: 700, fontSize: '0.95rem', color: '#1e293b', marginBottom: '0.25rem' }}>
+                        {t.item}
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: '#475569' }}>
+                        📍 {t.store}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+
+          </div>
+        )}
 
         {(hasSearched || loading) && (
           <section style={{ marginTop: '2rem' }}>
