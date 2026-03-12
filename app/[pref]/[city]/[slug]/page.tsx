@@ -1,4 +1,3 @@
-// app/[pref]/[city]/[slug]/page.tsx
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';

@@ -976,8 +976,7 @@ function HomePageContent() {
   // ★ 新規追加：注目のくじ一覧（表示用データ）
   const FEATURED_ITEMS = ['ポケモンカード', '一番くじ 呪術廻戦', '一番くじ ワンピース', '一番くじ ドラゴンボール'];
 
-  // ★ 新規追加：最新の報告タイムライン（※まずはデザイン確認用のサンプルデータ）
-  // ★ タイムライン用の状態（ステート）を準備
+  // ★ 新規追加：最新の報告タイムライン
   const [timeline, setTimeline] = useState<{
     id: string;
     store: string;
@@ -988,11 +987,9 @@ function HomePageContent() {
     bg: string;
   }[]>([]);
 
-// ★ ページが開かれた時にSupabaseから最新の投稿を5件取得する
   useEffect(() => {
     async function loadTimeline() {
       try {
-        // 1. まず、投稿データ（store_product_flags）を最新順で取得
         const { data: flags, error: flagsError } = await supabase
           .from('store_product_flags')
           .select('*')
@@ -1002,11 +999,9 @@ function HomePageContent() {
         if (flagsError) throw flagsError;
 
         if (flags && flags.length > 0) {
-          // 2. 取得した投稿の store_id と product_id をまとめる
           const storeIds = [...new Set(flags.map(f => f.store_id))];
           const productIds = [...new Set(flags.map(f => f.product_id))];
 
-          // 3. 必要な店舗情報を取得（※エラーの原因だった列名を「id, name」だけに修正）
           const { data: storesData, error: storesError } = await supabase
             .from('stores')
             .select('id, name')
@@ -1014,7 +1009,6 @@ function HomePageContent() {
             
           if (storesError) console.error('店舗エラー:', storesError);
 
-          // 4. 必要な商品情報を取得
           const { data: productsData, error: productsError } = await supabase
             .from('products')
             .select('id, name')
@@ -1022,12 +1016,10 @@ function HomePageContent() {
             
           if (productsError) console.error('商品エラー:', productsError);
 
-          // 5. データを結合して表示用の形に整形する
           const formatted = flags.map((flag, index) => {
             const store = storesData?.find(s => s.id === flag.store_id);
             const product = productsData?.find(p => p.id === flag.product_id);
 
-            // ここもシンプルに store.name だけを参照するように変更
             const storeName = store?.name || '店舗名不明';
             const productName = product?.name || '商品名不明';
             const isFound = flag.status === 'found';
@@ -1187,12 +1179,6 @@ function HomePageContent() {
                       cursor: 'pointer',
                       transition: 'background-color 0.2s',
                     }}
-                    onMouseOver={(e) => {
-                      e.currentTarget.style.backgroundColor = '#e2e8f0';
-                    }}
-                    onMouseOut={(e) => {
-                      e.currentTarget.style.backgroundColor = '#f1f5f9';
-                    }}
                   >
                     <div style={{ fontWeight: 600, color: '#1e293b' }}>{c.name}</div>
                     {c.category && <div style={{ fontSize: '0.8rem', color: '#64748b' }}>{c.category}</div>}
@@ -1315,8 +1301,6 @@ function HomePageContent() {
                       boxShadow: '0 2px 4px rgba(0,0,0,0.02)',
                       transition: 'border-color 0.2s'
                     }}
-                    onMouseOver={(e) => e.currentTarget.style.borderColor = '#93c5fd'}
-                    onMouseOut={(e) => e.currentTarget.style.borderColor = '#e2e8f0'}
                   >
                     {item}
                   </button>
@@ -1348,8 +1332,6 @@ function HomePageContent() {
                         cursor: 'pointer',
                         transition: 'border-color 0.2s'
                       }}
-                      onMouseOver={(e) => e.currentTarget.style.borderColor = '#93c5fd'}
-                      onMouseOut={(e) => e.currentTarget.style.borderColor = '#e2e8f0'}
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
                         <span style={{ fontSize: '0.75rem', color: '#64748b' }}>{t.time}</span>
@@ -1560,7 +1542,7 @@ function HomePageContent() {
                         fontSize: '0.9rem',
                       }}
                     >
-                      <div style={{ marginBottom: '0.4rem' }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center', marginBottom: '12px' }}>
                         {mapUrl ? (
                           <a
                             href={mapUrl}
@@ -1572,24 +1554,16 @@ function HomePageContent() {
                                 address_value: displayAddress,
                               })
                             }
-                            style={{
-                              color: '#2563eb',
-                              textDecoration: 'none',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: 4,
-                            }}
+                            style={{ color: '#2563eb', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}
                           >
                             📍 {displayAddress}
                           </a>
                         ) : (
-                          <span style={{ color: '#475569' }}>📍 {displayAddress}</span>
+                          <span style={{ color: '#475569', display: 'flex', alignItems: 'center', gap: 4 }}>📍 {displayAddress}</span>
                         )}
-                      </div>
 
-                      {displayPhone && (
-                        <div>
-                          {phoneDigits ? (
+                        {displayPhone && (
+                          phoneDigits ? (
                             <a
                               href={`tel:${phoneDigits}`}
                               onClick={() =>
@@ -1598,21 +1572,54 @@ function HomePageContent() {
                                   phone_value: displayPhone,
                                 })
                               }
-                              style={{
-                                color: '#2563eb',
-                                textDecoration: 'none',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: 4,
-                              }}
+                              style={{ color: '#2563eb', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}
                             >
                               📞 {displayPhone}
                             </a>
                           ) : (
-                            <span style={{ color: '#475569' }}>📞 {displayPhone}</span>
-                          )}
-                        </div>
-                      )}
+                            <span style={{ color: '#475569', display: 'flex', alignItems: 'center', gap: 4 }}>📞 {displayPhone}</span>
+                          )
+                        )}
+                      </div>
+
+                      {/* ★ 新規追加：在庫あり店舗限定のX拡散ボタン（URLエンコード修正版） */}
+                      {(() => {
+                        const hasFoundReport = Number(store.score?.foundCount ?? 0) > 0 || Number(store.community?.found ?? 0) > 0;
+                        if (selectedCandidate && hasFoundReport) {
+                          
+                          // 【修正ポイント】商品名（keyword）をURL用に変換（エンコード）してスペースで切れないようにする
+                          const shareUrl = `https://qpick.net/?productId=${selectedCandidate.id}&keyword=${encodeURIComponent(selectedCandidate.name)}`;
+                          const shareText = `【${selectedCandidate.name}】\n${displayName} で在庫見つけたよ！\n現在地近くの在庫状況はここからチェック👇\n#Qpick #一番くじ\n`;
+
+                          return (
+                            <div style={{ marginTop: '8px', animation: 'fadeIn 0.4s ease-in' }}>
+                              <a
+                                href={`https://x.com/intent/tweet?text=${encodeURIComponent(shareText)}&url=${encodeURIComponent(shareUrl)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                  padding: '6px 12px',
+                                  backgroundColor: '#000000',
+                                  color: '#ffffff',
+                                  borderRadius: '8px',
+                                  fontSize: '0.8rem',
+                                  fontWeight: 'bold',
+                                  textDecoration: 'none',
+                                }}
+                              >
+                                <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                                </svg>
+                                見つけた！とXでシェア
+                              </a>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
 
                     {productId !== null && (
