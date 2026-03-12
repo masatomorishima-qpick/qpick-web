@@ -40,9 +40,9 @@ function getErrorMessage(err: unknown): string {
   }
 }
 
-// セッションID生成（簡易版）
+// セッションID（poster_id）生成・取得
 function getOrCreateSessionId(): string {
-  const KEY = 'qpick_session_id';
+  const KEY = 'qpick_poster_id'; // マイページと共通のキーに変更
   try {
     const existing = localStorage.getItem(KEY);
     if (existing) return existing;
@@ -86,14 +86,15 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
   const [commentNotice, setCommentNotice] = useState<string | null>(null);
   const [commentError, setCommentError] = useState<string | null>(null);
 
-  // コメント表示用モーダルの状態
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [comments, setComments] = useState<ApprovedComment[]>([]);
   const [commentsLoading, setCommentsLoading] = useState(false);
 
+  // ★ 新規追加：EXP獲得ポップアップの表示状態
+  const [showExpToast, setShowExpToast] = useState(false);
+
   const votedKey = useMemo(() => `qpick_voted:${storeId}:${productId}`, [storeId, productId]);
 
-  // 1時間経過チェック（LocalStorage）
   useEffect(() => {
     try {
       const raw = localStorage.getItem(votedKey);
@@ -112,7 +113,47 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
     }
   }, [votedKey]);
 
-  // 投票処理
+  // ★ 新規追加：1日1回のEXP付与ロジック
+  const grantDailyExp = async (sessionId: string) => {
+    try {
+      const today = new Date().toLocaleDateString('ja-JP'); // 例: "2026/3/12"
+      const lastExpDate = localStorage.getItem('qpick_last_exp_date');
+
+      // 今日すでにEXPをもらっていたら何もしない
+      if (lastExpDate === today) return;
+
+      // まだもらっていなければ、DBのプロフィールを探す
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('exp')
+        .eq('id', sessionId)
+        .maybeSingle();
+
+      if (profile) {
+        // プロフィールが存在すれば、EXPを+1して更新
+        await supabase
+          .from('profiles')
+          .update({ exp: profile.exp + 1 })
+          .eq('id', sessionId);
+      } else {
+        // プロフィールがまだ無ければ、1EXP持った状態で新規作成
+        await supabase
+          .from('profiles')
+          .insert({ id: sessionId, nickname: '名無しのコレクター', exp: 1 });
+      }
+
+      // 今日EXPをもらった印をスマホに保存
+      localStorage.setItem('qpick_last_exp_date', today);
+
+      // 「+1 EXP獲得！」のポップアップを3秒間表示
+      setShowExpToast(true);
+      setTimeout(() => setShowExpToast(false), 3000);
+
+    } catch (err) {
+      console.error('EXP付与に失敗しました:', err);
+    }
+  };
+
   const handleVote = async (status: VotedStatus) => {
     if (votedStatus || voteLoading) return;
 
@@ -147,7 +188,6 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
         } satisfies VotedCache);
         localStorage.setItem(votedKey, storageValue);
 
-        // ✅ GA（任意：投票成功ログ）
         try {
           sendGAEvent('event', 'vote_submit', {
             store_id: storeId,
@@ -156,7 +196,6 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
           });
         } catch {}
 
-        // ✅ Feature1：投票成功→店舗カードのスコアを即更新（親ページに通知）
         try {
           window.dispatchEvent(
             new CustomEvent('qpick_vote_success', {
@@ -169,6 +208,10 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
             })
           );
         } catch {}
+
+        // ★ 新規追加：投票成功時に、1日1回のEXP付与処理を呼び出す
+        await grantDailyExp(sessionId);
+
       } else {
         setVoteError(result?.message ?? 'しばらく時間を空けてから再度お試しください。');
       }
@@ -180,7 +223,6 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
     }
   };
 
-  // コメント送信処理
   const handleSendComment = async () => {
     setCommentError(null);
     setCommentNotice(null);
@@ -191,7 +233,6 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
     setCommentLoading(true);
 
     try {
-      // is_approved はDBデフォルトで FALSE になるため、送信直後は非表示
       const { error } = await supabase.from('feedback').insert({
         store_id: storeId,
         product_id: productId,
@@ -209,7 +250,6 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
     }
   };
 
-  // コメント取得処理（承認済みのみ）
   const fetchComments = async () => {
     setCommentsLoading(true);
     try {
@@ -249,7 +289,39 @@ export default function StoreFeedback({ storeId, storeName, productId, address, 
   };
 
   return (
-    <div style={{ display: 'grid', gap: '1rem' }}>
+    <div style={{ display: 'grid', gap: '1rem', position: 'relative' }}>
+      
+      {/* ★ 新規追加：EXP獲得時のトースト通知 */}
+      {showExpToast && (
+        <div style={{
+          position: 'absolute',
+          top: '-40px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          backgroundColor: '#f59e0b',
+          color: '#fff',
+          padding: '8px 16px',
+          borderRadius: '999px',
+          fontWeight: 'bold',
+          fontSize: '0.9rem',
+          boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
+          animation: 'bounceIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+          zIndex: 10,
+          whiteSpace: 'nowrap'
+        }}>
+          ✨ 1 EXP 獲得しました！
+        </div>
+      )}
+
+      {/* キーフレームアニメーション（グローバルCSSがない場合の簡易対応） */}
+      <style>{`
+        @keyframes bounceIn {
+          0% { opacity: 0; transform: translateX(-50%) scale(0.8); }
+          50% { transform: translateX(-50%) scale(1.1); }
+          100% { opacity: 1; transform: translateX(-50%) scale(1); }
+        }
+      `}</style>
+
       <div
         style={{
           fontWeight: 800,

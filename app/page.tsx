@@ -9,6 +9,25 @@ import StoreFeedback from '@/components/StoreFeedback';
 import WatchNotifyBar from '@/components/WatchNotifyBar';
 import { supabase } from '@/lib/supabaseClient';
 
+// ブラウザ用のID生成と称号判定機能
+function generateUUID() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+function getTitle(exp: number) {
+  if (exp >= 15) return '【殿堂入り】レジェンド';
+  if (exp >= 7) return 'エキスパート';
+  if (exp >= 3) return 'ナビゲーター';
+  if (exp >= 1) return 'サポーター';
+  return 'ルーキー';
+}
+
 type Candidate = {
   id: number;
   name: string;
@@ -230,6 +249,9 @@ function HomePageContent() {
 
   const [requestSent, setRequestSent] = useState(false);
 
+  // トップページでユーザーのステータスを表示するためのState
+  const [myProfile, setMyProfile] = useState<{ exp: number } | null>(null);
+
   const trimmedKeyword = useMemo(() => keyword.trim(), [keyword]);
   const isHandlingMode = handlingAvailable;
   const shouldHideNearbyWhileCheckingHandling = handlingLoading && !handlingAvailable;
@@ -238,6 +260,30 @@ function HomePageContent() {
     if (!trimmedKeyword) return null;
     return `qpick_requested:${trimmedKeyword.toLowerCase()}`;
   }, [trimmedKeyword]);
+
+  // ページ読み込み時にユーザーのステータス（EXP）を取得
+  useEffect(() => {
+    async function loadMyProfile() {
+      let id = localStorage.getItem('qpick_poster_id');
+      if (!id) {
+        id = generateUUID();
+        localStorage.setItem('qpick_poster_id', id);
+      }
+      
+      const { data } = await supabase
+        .from('profiles')
+        .select('exp')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (data) {
+        setMyProfile(data);
+      } else {
+        setMyProfile({ exp: 0 }); // 新規ユーザー
+      }
+    }
+    loadMyProfile();
+  }, []);
 
   useEffect(() => {
     if (!requestKey) {
@@ -1044,6 +1090,10 @@ function HomePageContent() {
     loadTimeline();
   }, []);
 
+  // 現在のステータス計算
+  const currentExp = myProfile?.exp ?? 0;
+  const currentTitle = getTitle(currentExp);
+
   return (
     <main
       style={{
@@ -1056,39 +1106,71 @@ function HomePageContent() {
       }}
     >
       <div style={{ width: '100%', maxWidth: 600, display: 'flex', flexDirection: 'column' }}>
+        
+        {/* マイページへのリンクバッジ */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '1rem' }}>
+          <Link
+            href="/mypage"
+            prefetch={false}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '10px',
+              padding: '6px 14px',
+              backgroundColor: '#ffffff',
+              borderRadius: '999px',
+              border: '1px solid #e2e8f0',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+              textDecoration: 'none',
+              transition: 'all 0.2s',
+            }}
+          >
+            <div style={{ fontSize: '1.4rem' }}>🏅</div>
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              <span style={{ fontSize: '0.65rem', color: '#64748b', fontWeight: 700, lineHeight: 1, marginBottom: '2px' }}>
+                あなたの称号
+              </span>
+              <span style={{ fontSize: '0.9rem', fontWeight: 800, color: '#f59e0b', lineHeight: 1 }}>
+                {currentTitle} <span style={{ color: '#475569', fontSize: '0.75rem', fontWeight: 400 }}>({currentExp} EXP)</span>
+              </span>
+            </div>
+            <span style={{ color: '#cbd5e1', fontSize: '0.8rem', marginLeft: '4px' }}>▶︎</span>
+          </Link>
+        </div>
+
+        {/* ★ 変更：ファーストビューのデザインと順番を整理 */}
         <header
           style={{
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
-            marginBottom: '2rem',
+            marginBottom: '1.5rem',
             textAlign: 'center',
           }}
         >
-          <div style={{ marginBottom: '1rem' }}>
+          <h1 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#1e293b', margin: 0, lineHeight: 1.4 }}>
+            一番くじ・限定品、<br/>最寄りのコンビニにあるかも？
+          </h1>
+          
+          <p style={{ margin: '0.5rem 0 0.75rem', color: '#64748b', fontSize: '0.9rem', fontWeight: 500 }}>
+            みんなの目撃情報で「売ってない！」の絶望を回避
+          </p>
+
+          <div>
             <span
               style={{
                 display: 'inline-block',
-                backgroundColor: '#eff6ff',
-                color: '#1d4ed8',
-                border: '1px solid #bfdbfe',
-                fontSize: '0.8rem',
-                fontWeight: 700,
-                padding: '0.3rem 0.8rem',
-                borderRadius: 999,
+                backgroundColor: '#f1f5f9',
+                color: '#475569',
+                fontSize: '0.75rem',
+                fontWeight: 600,
+                padding: '0.2rem 0.6rem',
+                borderRadius: 6,
               }}
             >
-              α版：東京・大阪エリア（セブン・ファミマ・ローソン）
+              ※α版：東京・大阪のセブン・ファミマ・ローソン対象
             </span>
           </div>
-
-          <h1 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#111827', margin: 0, lineHeight: 1.4 }}>
-            一番くじ・限定品、最寄りのコンビニにあるかも？
-          </h1>
-
-          <p style={{ margin: '0.5rem 0 0', color: '#6b7280', fontSize: '0.9rem' }}>
-            みんなの目撃情報で「売ってない！」の絶望を回避
-          </p>
         </header>
 
         <div
@@ -1273,16 +1355,13 @@ function HomePageContent() {
           </form>
         </div>
 
-        {/* ★ 新規追加：検索前の画面にだけ表示される「注目のくじ」と「タイムライン」 */}
         {!hasSearched && !loading && (
           <div style={{ marginTop: '2rem', animation: 'fadeIn 0.3s ease-in' }}>
             
-            {/* 注目のくじセクション */}
             <div style={{ marginBottom: '2rem' }}>
               <h2 style={{ fontSize: '1rem', fontWeight: 800, color: '#334155', marginBottom: '1rem' }}>
                 🔥 今、注目のくじ・限定品
               </h2>
-              {/* 横スクロール対応のコンテナ */}
               <div style={{ display: 'flex', gap: '0.75rem', overflowX: 'auto', paddingBottom: '0.5rem', scrollbarWidth: 'none' }}>
                 {FEATURED_ITEMS.map(item => (
                   <button
@@ -1308,7 +1387,6 @@ function HomePageContent() {
               </div>
             </div>
 
-            {/* 最新の報告タイムラインセクション */}
             <div>
               <h2 style={{ fontSize: '1rem', fontWeight: 800, color: '#334155', marginBottom: '1rem' }}>
                 ⚡ 最新の在庫報告（リアルタイム）
@@ -1348,7 +1426,6 @@ function HomePageContent() {
                 )}
               </div>
             </div>
-
 
           </div>
         )}
@@ -1582,12 +1659,9 @@ function HomePageContent() {
                         )}
                       </div>
 
-                      {/* ★ 新規追加：在庫あり店舗限定のX拡散ボタン（URLエンコード修正版） */}
                       {(() => {
                         const hasFoundReport = Number(store.score?.foundCount ?? 0) > 0 || Number(store.community?.found ?? 0) > 0;
                         if (selectedCandidate && hasFoundReport) {
-                          
-                          // 【修正ポイント】商品名（keyword）をURL用に変換（エンコード）してスペースで切れないようにする
                           const shareUrl = `https://qpick.net/?productId=${selectedCandidate.id}&keyword=${encodeURIComponent(selectedCandidate.name)}`;
                           const shareText = `【${selectedCandidate.name}】\n${displayName} で在庫見つけたよ！\n現在地近くの在庫状況はここからチェック👇\n#Qpick #一番くじ\n`;
 
