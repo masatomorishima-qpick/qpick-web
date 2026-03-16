@@ -3,9 +3,12 @@ import { supabase } from '@/lib/supabaseClient';
 
 export const revalidate = 3600;
 
-type StoreSlugRow = {
+type StoreAreaRow = {
   pref: string | null;
   city: string | null;
+};
+
+type PokecaSlugRow = {
   slug: string | null;
 };
 
@@ -22,7 +25,7 @@ function safeText(v: unknown): string {
   return typeof v === 'string' ? v.trim() : '';
 }
 
-async function fetchAllStoreSlugs(): Promise<StoreSlugRow[]> {
+async function fetchAllStoreAreas(): Promise<StoreAreaRow[]> {
   const PAGE_SIZE = 1000;
   const CONCURRENCY = 6;
 
@@ -36,23 +39,26 @@ async function fetchAllStoreSlugs(): Promise<StoreSlugRow[]> {
   if (!Number.isFinite(total) || total <= 0) return [];
 
   const pages = Math.ceil(total / PAGE_SIZE);
-  const out: StoreSlugRow[] = [];
+  const out: StoreAreaRow[] = [];
 
   for (let start = 0; start < pages; start += CONCURRENCY) {
-    const batch = Array.from({ length: Math.min(CONCURRENCY, pages - start) }, (_, i) => start + i);
+    const batch = Array.from(
+      { length: Math.min(CONCURRENCY, pages - start) },
+      (_, i) => start + i
+    );
 
     const results = await Promise.all(
-      batch.map(async (page): Promise<StoreSlugRow[]> => {
+      batch.map(async (page): Promise<StoreAreaRow[]> => {
         const from = page * PAGE_SIZE;
         const to = from + PAGE_SIZE - 1;
 
         const { data, error } = await supabase
           .from('stores')
-          .select('pref, city, slug')
+          .select('pref, city')
           .range(from, to);
 
         if (error) throw new Error(error.message);
-        return (data ?? []) as unknown as StoreSlugRow[];
+        return (data ?? []) as unknown as StoreAreaRow[];
       })
     );
 
@@ -60,6 +66,20 @@ async function fetchAllStoreSlugs(): Promise<StoreSlugRow[]> {
   }
 
   return out;
+}
+
+async function fetchPokecaProductSlugs(): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('products')
+    .select('slug')
+    .eq('seo_enabled', true)
+    .not('slug', 'is', null);
+
+  if (error) throw new Error(error.message);
+
+  return ((data ?? []) as PokecaSlugRow[])
+    .map((row) => safeText(row.slug))
+    .filter(Boolean);
 }
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
@@ -71,21 +91,19 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${SITE_URL}/terms`, lastModified: now },
   ];
 
-  const rows = await fetchAllStoreSlugs();
+  const rows = await fetchAllStoreAreas();
+  const pokecaSlugs = await fetchPokecaProductSlugs();
 
-  // /pref, /pref/city, /pref/city/slug を stores から生成
+  // /pref, /pref/city を stores から生成
   const prefSet = new Set<string>();
   const citySet = new Set<string>(); // key = `${pref}||${city}`
-  const storeSet = new Set<string>(); // key = `${pref}||${city}||${slug}`
 
   for (const r of rows) {
     const pref = safeText(r.pref);
     const city = safeText(r.city);
-    const slug = safeText(r.slug);
 
     if (pref) prefSet.add(normalizeSlug(pref));
     if (pref && city) citySet.add(`${normalizeSlug(pref)}||${city}`);
-    if (pref && city && slug) storeSet.add(`${normalizeSlug(pref)}||${city}||${slug}`);
   }
 
   const prefUrls: MetadataRoute.Sitemap = Array.from(prefSet).map((pref) => ({
@@ -101,13 +119,29 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     };
   });
 
-  const storeUrls: MetadataRoute.Sitemap = Array.from(storeSet).map((key) => {
-    const [pref, city, slug] = key.split('||');
-    return {
-      url: `${SITE_URL}/${encodeURIComponent(pref)}/${encodeURIComponent(city)}/${encodeURIComponent(slug)}`,
+  const pokecaUrls: MetadataRoute.Sitemap = pokecaSlugs.flatMap((slug) => [
+    {
+      url: `${SITE_URL}/pokeca/${encodeURIComponent(slug)}`,
       lastModified: now,
-    };
-  });
+    },
+    {
+      url: `${SITE_URL}/pokeca/${encodeURIComponent(slug)}/seven-eleven`,
+      lastModified: now,
+    },
+    {
+      url: `${SITE_URL}/pokeca/${encodeURIComponent(slug)}/familymart`,
+      lastModified: now,
+    },
+    {
+      url: `${SITE_URL}/pokeca/${encodeURIComponent(slug)}/lawson`,
+      lastModified: now,
+    },
+  ]);
 
-  return [...base, ...prefUrls, ...cityUrls, ...storeUrls];
+  return [
+    ...base,
+    ...prefUrls,
+    ...cityUrls,
+    ...pokecaUrls,
+  ];
 }
