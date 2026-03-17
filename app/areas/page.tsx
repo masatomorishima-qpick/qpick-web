@@ -4,6 +4,7 @@
 
 import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
+import SoldOutRadarCard from '@/components/SoldOutRadarCard';
 
 // ✅ 1時間キャッシュ（都道府県一覧は頻繁に変わらない想定）
 // ※「即時反映したい」場合は、この行を削除して dynamic='force-dynamic' に戻してください
@@ -13,7 +14,7 @@ export async function generateMetadata() {
   return {
     title: 'エリア別コンビニ店舗情報｜コンビニの在庫共有サービスQpick',
     description:
-      '都道府県→市区町村→店舗詳細の順で、コンビニ店舗情報を確認できます。店舗詳細では買えた率やコメントも確認できます。',
+      '都道府県→市区町村→店舗詳細の順で、コンビニ店舗情報を確認できます。注目商品の売り切れ傾向や、店舗詳細の買えた率・コメントも確認できます。',
     alternates: { canonical: '/areas' },
   };
 }
@@ -40,7 +41,10 @@ async function fetchPrefSlugsFromStores() {
 
   // 2) バッチ並列でprefを取得
   for (let startPage = 0; startPage < pages; startPage += CONCURRENCY) {
-    const batch = Array.from({ length: Math.min(CONCURRENCY, pages - startPage) }, (_, i) => startPage + i);
+    const batch = Array.from(
+      { length: Math.min(CONCURRENCY, pages - startPage) },
+      (_, i) => startPage + i
+    );
 
     const results = await Promise.all(
       batch.map(async (page) => {
@@ -101,7 +105,6 @@ export default async function AreasPage() {
   return (
     <main style={{ maxWidth: 980, margin: '0 auto', padding: '24px 16px' }}>
       <nav style={{ fontSize: 14, color: '#64748b' }}>
-        {/* ✅ 内部リンクは Link。さらに ✅ prefetch を止める（大量 ?_rsc を防ぐ） */}
         <Link
           href="/"
           prefetch={false}
@@ -112,7 +115,9 @@ export default async function AreasPage() {
         {' > '} <span>エリア別店舗情報</span>
       </nav>
 
-      <h1 style={{ fontSize: 28, marginTop: 12, lineHeight: 1.3 }}>エリア別コンビニ店舗情報</h1>
+      <h1 style={{ fontSize: 28, marginTop: 12, lineHeight: 1.3 }}>
+        エリア別コンビニ店舗情報
+      </h1>
 
       <p style={{ marginTop: 10, color: '#475569', lineHeight: 1.8 }}>
         都道府県 → 市区町村 → 店舗詳細の順で確認できます。店舗詳細では「買えた率」「商品別の買えた率」「コメント」などが見られます。
@@ -125,7 +130,7 @@ export default async function AreasPage() {
             <Link
               key={slug}
               href={`/${encodeURIComponent(slug)}`}
-              prefetch={false} // ✅ これがアクションA（都道府県リンクの自動prefetchを止める）
+              prefetch={false}
               style={linkStyle}
             >
               {nameBySlug.get(slug) ?? slug}
@@ -133,6 +138,8 @@ export default async function AreasPage() {
           ))}
         </div>
       </section>
+
+      <SoldOutRadarCard />
     </main>
   );
 }
